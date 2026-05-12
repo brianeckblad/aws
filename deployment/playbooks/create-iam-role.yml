@@ -4,11 +4,11 @@
 # Creates one IAM role that covers all applications running on this server.
 # Named after iam_role_name (defined in vault.yml), not any specific app.
 #
-# Policies attached:
-#   S3              — all buckets (each app manages its own bucket)
-#   Secrets Manager — all secrets (each app namespaces with {app_name}/*)
-#   CloudWatch      — metrics and log streams for any app
-#   SNS             — publish to any topic (app alert notifications)
+# Policies follow least-privilege:
+#   S3              — only buckets matching {host_name}-* prefix
+#   Secrets Manager — only secrets under {host_name}/* and {app_name}/* paths
+#   CloudWatch      — metrics + logs (resource: * required by AWS; actions are scoped)
+#   SNS             — only topics matching {host_name}-* prefix
 #   SSM             — Session Manager (AWSManagedInstanceCore)
 #   Serial Console  — emergency recovery access
 #
@@ -23,6 +23,20 @@
     - ../group_vars/vault.yml
 
   tasks:
+
+    # -------------------------------------------------------------------------
+    # Resolve AWS account ID — used in all resource ARNs so policies are
+    # account-scoped and cannot match resources in other AWS accounts.
+    # -------------------------------------------------------------------------
+    - name: Get AWS account ID
+      ansible.builtin.command: aws sts get-caller-identity --query Account --output text
+      register: aws_account_id_raw
+      changed_when: false
+
+    - name: Set account ID fact
+      set_fact:
+        aws_account_id: "{{ aws_account_id_raw.stdout | trim }}"
+
     - name: Create IAM role
       amazon.aws.iam_role:
         name: "{{ iam_role_name }}"
@@ -46,10 +60,9 @@
           ManagedBy: Ansible
 
     # -------------------------------------------------------------------------
-    # S3 — All buckets
-    # Each app on this server uses its own S3 bucket (e.g. my-awshosting-data).
-    # The server role covers all of them with a wildcard resource.
-    # Tighten by listing specific bucket ARNs once all apps are known.
+    # S3 — scoped to buckets matching the {host_name}-* prefix only.
+    # Each app should name its bucket {host_name}-{app_name} or similar.
+    # To add a bucket outside this pattern, append its ARN to the Resource list.
     # -------------------------------------------------------------------------
     - name: Attach S3 access policy
       amazon.aws.iam_policy:
@@ -60,7 +73,7 @@
         policy_json:
           Version: "2012-10-17"
           Statement:
-            - Sid: S3BucketAccess
+            - Sid: S3ObjectAccess
               Effect: Allow
               Action:
                 - s3:GetObject
@@ -68,20 +81,19 @@
                 - s3:DeleteObject
                 - s3:GetObjectVersion
                 - s3:DeleteObjectVersion
-              Resource: "arn:aws:s3:::*/*"
-            - Sid: S3BucketList
+              Resource: "arn:aws:s3:::{{ host_name }}-*/*"
+            - Sid: S3BucketAccess
               Effect: Allow
               Action:
                 - s3:ListBucket
                 - s3:GetBucketLocation
                 - s3:ListBucketVersions
-              Resource: "arn:aws:s3:::*"
+              Resource: "arn:aws:s3:::{{ host_name }}-*"
 
     # -------------------------------------------------------------------------
-    # Secrets Manager — all secrets
-    # Apps name their secrets {app_name}/production (e.g. awshosting/production).
-    # The wildcard lets any app on this server create and read its own secrets
-    # without needing per-app IAM changes.
+    # Secrets Manager — scoped to secrets under {host_name}/* and {app_name}/*
+    # paths only. AWS appends a 6-char suffix to secret names (hence the
+    # trailing wildcard on each path).
     # -------------------------------------------------------------------------
     - name: Attach Secrets Manager access policy
       amazon.aws.iam_policy:
@@ -102,10 +114,15 @@
                 - secretsmanager:DeleteSecret
                 - secretsmanager:TagResource
                 - secretsmanager:ListSecrets
-              Resource: "arn:aws:secretsmanager:{{ aws_region }}:*:secret:*"
+              Resource:
+                - "arn:aws:secretsmanager:{{ aws_region }}:{{ aws_account_id }}:secret:{{ host_name }}/*"
+                - "arn:aws:secretsmanager:{{ aws_region }}:{{ aws_account_id }}:secret:{{ app_name }}/*"
 
     # -------------------------------------------------------------------------
-    # CloudWatch — metrics and logs for all apps on this server
+    # CloudWatch — metrics and logs.
+    # AWS does not support resource-level restrictions on PutMetricData or most
+    # log actions, so Resource: "*" is required here. The actions are scoped to
+    # only what the server needs (write + describe; no delete).
     # -------------------------------------------------------------------------
     - name: Attach CloudWatch access policy
       amazon.aws.iam_policy:
@@ -131,10 +148,14 @@
                 - logs:PutLogEvents
                 - logs:DescribeLogStreams
                 - logs:DescribeLogGroups
-              Resource: "*"
+              Resource:
+                - "arn:aws:logs:{{ aws_region }}:{{ aws_account_id }}:log-group:/{{ host_name }}/*"
+                - "arn:aws:logs:{{ aws_region }}:{{ aws_account_id }}:log-group:/{{ host_name }}/*:*"
+                - "arn:aws:logs:{{ aws_region }}:{{ aws_account_id }}:log-group:/{{ app_name }}/*"
+                - "arn:aws:logs:{{ aws_region }}:{{ aws_account_id }}:log-group:/{{ app_name }}/*:*"
 
     # -------------------------------------------------------------------------
-    # SNS — allow apps to publish alert notifications to any topic
+    # SNS — scoped to topics matching the {host_name}-* prefix only.
     # -------------------------------------------------------------------------
     - name: Attach SNS publish policy
       amazon.aws.iam_policy:
@@ -149,7 +170,7 @@
               Effect: Allow
               Action:
                 - sns:Publish
-              Resource: "arn:aws:sns:{{ aws_region }}:*:*"
+              Resource: "arn:aws:sns:{{ aws_region }}:{{ aws_account_id }}:{{ host_name }}-*"
 
     # -------------------------------------------------------------------------
     # EC2 Serial Console — emergency recovery without SSH key
@@ -176,7 +197,7 @@
               Effect: Allow
               Action:
                 - ec2-instance-connect:SendSerialConsoleSSHPublicKey
-              Resource: "arn:aws:ec2:{{ aws_region }}:*:instance/*"
+              Resource: "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:instance/*"
 
     # -------------------------------------------------------------------------
     # Instance Profile — attaches the role to the EC2 instance
@@ -192,12 +213,25 @@
         msg: |
 
           ✓ IAM Role:         {{ iam_role_name }}
+            Account:          {{ aws_account_id }}
             Instance Profile: {{ iam_instance_profile_name }}
 
-            Policies:
-              {{ iam_policy_s3 }}            - S3 (read/write/delete)
-              {{ iam_policy_secrets }}        - Secrets Manager
-              {{ iam_policy_cloudwatch }}     - CloudWatch metrics + logs
-              {{ iam_policy_sns }}            - SNS publish
-              {{ iam_policy_serial_console }} - Serial Console
-              SSM                             - AmazonSSMManagedInstanceCore
+            Policies (least-privilege):
+              {{ iam_policy_s3 }}
+                S3 objects:   arn:aws:s3:::{{ host_name }}-*/*
+                S3 buckets:   arn:aws:s3:::{{ host_name }}-*
+
+              {{ iam_policy_secrets }}
+                Secrets:      {{ host_name }}/* and {{ app_name }}/*
+
+              {{ iam_policy_cloudwatch }}
+                Metrics:      resource:* (AWS requirement)
+                Logs:         /{{ host_name }}/* and /{{ app_name }}/*
+
+              {{ iam_policy_sns }}
+                Topics:       arn:aws:sns:{{ aws_region }}:{{ aws_account_id }}:{{ host_name }}-*
+
+              {{ iam_policy_serial_console }}
+                Instances:    arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:instance/*
+
+              SSM:            AmazonSSMManagedInstanceCore (AWS managed)
