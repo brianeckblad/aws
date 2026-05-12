@@ -1,129 +1,94 @@
-# awshosting
+# aws
 
-A Flask application for managing comic book inventory with AWS S3 storage, marketplace exports, and eBay price research.
+**Ansible automation for provisioning, hardening, and managing shared EC2 servers on AWS.**
+
+This repo handles server infrastructure only. Application deployments (nginx vhosts, SSL certificates, supervisor programs, S3 buckets, Secrets Manager entries) are managed from each app's own repo.
 
 ---
 
-## What It Does
+## What It Provisions
 
-Manage a comic book catalog, upload images to the cloud, export to marketplaces (Whatnot/eBay), research pricing, and generate SKU labels.
+```
+EC2 (shared server — Ubuntu 24.04 LTS)
+├── nginx          shared reverse proxy, default-deny vhost
+├── supervisor     shared process manager
+├── fail2ban       brute-force protection
+├── UFW            firewall (default deny; 22/80/443 open)
+├── /opt/apps/     EBS data volume — survives instance termination
+└── /var/log/apps/ shared log root for all apps
+```
 
-- Catalog comics with images and marketplace-ready descriptions
-- Cloud storage (AWS S3) with automatic image processing
-- Export CSV files for bulk marketplace uploads (Whatnot/eBay)
-- eBay price research and market analysis
-- SKU label generation for physical inventory
-- Trash/recovery system for deleted items
-- Multi-user support with individual accounts
+| AWS Resource | Name | Notes |
+|---|---|---|
+| EC2 instance | `{host_name}` | Ubuntu 24.04 LTS |
+| Security group | `{host_name}-sg` | Ports 22, 80, 443 |
+| IAM role | `{host_name}-ec2-role` | S3, Secrets Manager, CloudWatch, SNS, SSM |
+| SSH key pair | `{host_name}-key` | Saved to `~/.ssh/` |
+| EBS data volume | `{host_name}-data` | Mounted at `/opt/apps`, survives termination |
+
+---
+
+## Quick Start
+
+```bash
+# 1. Install dependencies (from repo root)
+pip install -r requirements.txt
+ansible-galaxy collection install -r requirements.yml --upgrade
+
+# 2. Configure
+cd deployment
+cp group_vars/vault.yml.example group_vars/vault.yml
+# Edit vault.yml with your settings, then encrypt:
+ansible-vault encrypt group_vars/vault.yml --vault-password-file ~/.vault_pass
+
+# 3. Load vars and provision
+source scripts/load-vars.sh
+ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass
+```
+
+Full guide: [deployment/docs/guides/QUICKSTART.md](deployment/docs/guides/QUICKSTART.md)
+
+---
+
+## Playbooks
+
+### Provision
+| Playbook | Purpose |
+|---|---|
+| `provision-server.yml` | Master — runs all steps below in order |
+| `create-security-group.yml` | Security group — ports 22, 80, 443 |
+| `create-iam-role.yml` | IAM role + instance profile |
+| `create-ssh-key.yml` | SSH key pair → `~/.ssh/` |
+| `launch-ec2-instance.yml` | EC2 instance + EBS data volume |
+| `harden-server.yml` | OS hardening, nginx, supervisor, fail2ban, UFW |
+
+### Maintain
+| Playbook | Purpose |
+|---|---|
+| `update-server.yml` | Upgrade OS packages, re-apply config changes |
+
+### Decommission
+| Playbook | Purpose |
+|---|---|
+| `decommission.yml` | Master — removes all server AWS resources |
+| `terminate-ec2-instance.yml` | Terminate the EC2 instance |
+| `delete-ssh-key.yml` | Delete SSH key from AWS + local |
+| `delete-security-group.yml` | Delete the security group |
+| `delete-iam-role.yml` | Delete the IAM role + instance profile |
 
 ---
 
 ## Requirements
 
-This application requires AWS cloud services for production use.
-
-| Requirement | Production | Local Development |
-|-------------|-----------|-------------------|
-| Python 3.8+ | Required | Required |
-| AWS account (S3, EC2) | Required | Optional (for S3 access) |
-| AWS CLI | Required | Optional |
-| Ansible | Required | Not needed |
-| eBay Developer account | Optional | Optional |
-
-Estimated monthly cost: $5–10 (S3 + small EC2 instance, free tier eligible).
-
----
-
-## Local Development
+| Tool | Purpose | Min version |
+|---|---|---|
+| Python | Ansible runtime | 3.8+ |
+| Ansible | Automation | 2.12+ |
+| AWS CLI | AWS operations | 2.x |
 
 ```bash
-git clone https://github.com/yourusername/awshosting.git
-cd awshosting_1
-python3 -m venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt
-
-mkdir -p instance/{uploads,item_images,images,exports,snapshots,trash}
-
-python runapp.py
-```
-
-Access at `http://localhost:8000`.
-
-For S3 access during local development, create a `.env` file:
-
-```env
-AWS_ACCESS_KEY_ID=your_key
-AWS_SECRET_ACCESS_KEY=your_secret
-S3_BUCKET=your-bucket-name
-USERS=username:password
-SECRET_KEY=random-secret-here
-```
-
-For production, all configuration comes from AWS Secrets Manager. See [Chapter 7: Secret Management](deployment/docs/guides/SECRET_MANAGEMENT.md).
-
----
-
-## Production Deployment
-
-Start at [Chapter 1: Prerequisites](deployment/docs/guides/PREREQUISITES.md), then follow the chapters in order.
-
-| Method | Time | Guide |
-|--------|------|-------|
-| Automated | 15–20 min | [Chapter 2: Quick Start](deployment/docs/guides/QUICKSTART.md) |
-| Step-by-step | 1–2 hrs | [Chapter 3: Manual Deployment](deployment/docs/guides/MANUAL_DEPLOYMENT.md) |
-
-The [full deployment guide](deployment/docs/README.md) covers 13 chapters: deploy, operate, harden, and decommission.
-
----
-
-## Architecture
-
-```
-Browser
-  │
-  ▼
-Flask (Gunicorn + Nginx)
-  ├── Routes ──── URL handlers
-  ├── Services ── Business logic (S3, CSV, eBay)
-  ├── Models ──── Data structures
-  └── Templates ─ HTML/CSS/JS
-  │           │
-  ▼           ▼
-Local        AWS S3
-(CSV)       (Images)
-```
-
-| Component | Technology |
-|-----------|-----------|
-| Backend | Flask 3.0+ (Python 3.8+) |
-| Storage | CSV files (local), AWS S3 (images), JSON (settings) |
-| Image processing | Pillow (WebP thumbnails) |
-| Frontend | HTML5, CSS3, JavaScript |
-| Deployment | Ansible, Nginx, Gunicorn, Systemd |
-
-No database required. CSV-based storage for portability.
-
----
-
-## Usage
-
-### Web Interface
-
-| Feature | URL |
-|---------|-----|
-| Add comic | `/add` |
-| Browse inventory | `/browse` |
-| Export CSV | `/download` |
-| Price lookup | `/price-lookup` |
-| Trash | `/trash` |
-| Account | `/account` |
-
-### Command Line
-
-```bash
-python main.py input.csv          # Batch process CSV
-python main.py --s3delete         # Manage S3 images
+ansible-galaxy collection install -r requirements.yml --upgrade
 ```
 
 ---
@@ -131,28 +96,37 @@ python main.py --s3delete         # Manage S3 images
 ## Project Structure
 
 ```
-awshosting/
-├── deployment/
-│   ├── playbooks/           Ansible playbooks
-│   ├── docs/                Deployment guide (13 chapters)
-│   └── group_vars/          Configuration templates
-└── requirements.txt         Python dependencies
+aws/
+├── requirements.txt          Python dependencies (boto3, cryptography, etc.)
+├── requirements.yml          Ansible collections (amazon.aws, community.general, ansible.posix)
+└── deployment/
+    ├── ansible.cfg           Ansible configuration
+    ├── playbooks/            All playbooks (provision, update, decommission)
+    ├── group_vars/
+    │   ├── vault.yml         Your config — encrypted, gitignored
+    │   └── vault.yml.example Template — copy and fill in
+    ├── inventories/
+    │   └── hosts.yml         Auto-generated with server IP on deploy
+    ├── templates/            Jinja2 templates (nginx, fail2ban, logrotate, etc.)
+    ├── scripts/
+    │   ├── load-vars.sh      Source to load vault vars into shell
+    │   ├── local-dev-setup.sh Setup/merge local config files
+    │   └── decommission.sh   Interactive teardown wrapper
+    └── docs/                 Full deployment guide (prerequisites → decommission)
 ```
 
 ---
 
-## Troubleshooting
+## Multi-App
 
-| Problem | Solution |
-|---------|----------|
-| Images not uploading to S3 | Check AWS credentials; verify bucket exists and has proper permissions |
-| Cannot log in | Verify `USERS` format is `username:password`; check `SECRET_KEY` is set; clear cookies |
-| CSV validation errors | Column names are case-sensitive; prices must be >= $1.00 |
+One server hosts multiple applications. After provisioning, each app deploys itself from its own repo using its own `setup.yml`. Each app needs a unique:
 
-See [Chapter 5: Operations — Troubleshooting](deployment/docs/guides/OPERATIONS.md#troubleshooting) for more.
+- `app_name` — drives all paths (`/opt/apps/{app_name}`), log dir, supervisor service
+- `server_name` — FQDN for nginx vhost + SSL cert (must resolve to this server's IP)
+- `gunicorn_port` — unique loopback port per app (8000, 8001, 8002 …)
 
 ---
 
-## License
+## Documentation
 
-MIT License. See [LICENSE](LICENSE).
+See [`deployment/docs/`](deployment/docs/README.md) for the full guide covering prerequisites, provisioning, operations, security hardening, and decommissioning.
