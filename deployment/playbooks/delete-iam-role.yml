@@ -1,0 +1,92 @@
+---
+# delete-iam-role.yml — Delete the shared server IAM role and instance profile
+# Counterpart to: create-iam-role.yml
+#
+# Removes (in order):
+#   1. Inline policies (s3-access, secrets-access, cloudwatch-access, sns-access, serial-console-access)
+#   2. Managed policy attachments (AmazonSSMManagedInstanceCore)
+#   3. Instance profile (host_name-instance-profile)
+#   4. IAM role (host_name-ec2-role)
+#
+# Usage: ansible-playbook playbooks/delete-iam-role.yml \
+#          --vault-password-file ~/.vault_pass
+
+- name: Delete IAM Role for Shared Server
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+    - name: "Step 1/4 — Delete inline policies from role"
+      amazon.aws.iam_policy:
+        iam_type: role
+        iam_name: "{{ iam_role_name }}"
+        policy_name: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ iam_policy_s3 }}"
+        - "{{ iam_policy_secrets }}"
+        - "{{ iam_policy_cloudwatch }}"
+        - "{{ iam_policy_sns }}"
+        - "{{ iam_policy_serial_console }}"
+      failed_when: false
+
+    - name: "Step 2/4 — Detach managed policies from role"
+      command: >
+        aws iam detach-role-policy
+        --role-name {{ iam_role_name }}
+        --policy-arn {{ item }}
+      loop:
+        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      failed_when: false
+      changed_when: false
+
+    - name: "Step 3/4 — Delete instance profile"
+      amazon.aws.iam_instance_profile:
+        name: "{{ iam_instance_profile_name }}"
+        state: absent
+      failed_when: false
+
+    - name: "Step 3/4 — Find any remaining instance profiles attached to role"
+      command: >
+        aws iam list-instance-profiles-for-role
+        --role-name {{ iam_role_name }}
+        --query 'InstanceProfiles[].InstanceProfileName'
+        --output text
+      register: remaining_profiles
+      failed_when: false
+      changed_when: false
+
+    - name: "Step 3/4 — Remove and delete stale instance profiles"
+      shell: |
+        aws iam remove-role-from-instance-profile \
+          --instance-profile-name {{ item }} \
+          --role-name {{ iam_role_name }} 2>/dev/null
+        aws iam delete-instance-profile \
+          --instance-profile-name {{ item }} 2>/dev/null
+      loop: "{{ remaining_profiles.stdout.split() | default([]) }}"
+      when: remaining_profiles.rc == 0 and remaining_profiles.stdout | trim | length > 0
+      failed_when: false
+
+    - name: "Step 4/4 — Delete IAM role"
+      amazon.aws.iam_role:
+        name: "{{ iam_role_name }}"
+        state: absent
+        create_instance_profile: false
+        delete_instance_profile: false
+      failed_when: false
+
+    - name: Display result
+      debug:
+        msg:
+          - "✓ IAM role deleted:           {{ iam_role_name }}"
+          - "✓ Instance profile deleted:   {{ iam_instance_profile_name }}"
+          - "✓ Inline policies removed:    {{ iam_policy_s3 }}, {{ iam_policy_secrets }},"
+          - "                              {{ iam_policy_cloudwatch }}, {{ iam_policy_sns }},"
+          - "                              {{ iam_policy_serial_console }}"
+          - "✓ Managed policies detached:  AmazonSSMManagedInstanceCore"
+          - ""
+          - "To recreate:"
+          - "  ansible-playbook playbooks/create-iam-role.yml --vault-password-file ~/.vault_pass"

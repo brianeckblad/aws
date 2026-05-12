@@ -1,0 +1,578 @@
+---
+# harden-server.yml — OS hardening and shared service foundation
+#
+# Run ONCE after launch-ec2-instance.yml to harden the OS and install
+# the shared services (nginx, supervisor) that all apps will use.
+#
+# This playbook is SERVER-LEVEL only. It does not deploy any application,
+# create nginx vhosts, install SSL certificates, or add supervisor programs.
+# Those are app-level concerns handled by each app's own setup.yml.
+#
+# What this does:
+#   - Full OS package upgrade
+#   - EBS data volume format and mount at apps_root (/opt/apps)
+#   - Shared log root directory (/var/log/apps)
+#   - SSH hardening (key-only, no root, retries, timeouts, X11 off)
+#   - Automatic security updates (unattended-upgrades)
+#   - Kernel parameter hardening (sysctl — IP spoofing, SYN flood, etc.)
+#   - Shared memory hardening (/run/shm noexec,nosuid)
+#   - Fail2ban (nginx attack/rate-limit protection; SSH is key-only)
+#   - UFW firewall (default deny ingress; allow 22, 80, 443)
+#   - Disable unused services (apache2, avahi-daemon, cups, bluetooth)
+#   - Nginx with hardened global config, default-deny vhost (444)
+#   - Supervisor (shared process manager, empty — apps add their programs)
+#   - System logging (rsyslog + logrotate)
+#
+# Usage:
+#   ansible-playbook playbooks/harden-server.yml \
+#     --vault-password-file ~/.vault_pass
+
+- name: Harden Server — OS Hardening and Shared Service Foundation
+  hosts: all
+  become: yes
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  vars:
+    system_packages:
+      # Core utilities
+      - curl
+      - wget
+      - git
+      - unzip
+      - htop
+      - tree
+      - jq
+      # Security
+      - ufw
+      - fail2ban
+      - unattended-upgrades
+      - apt-listchanges
+      # Web / process management
+      - nginx
+      - supervisor
+      # Python runtime
+      - python3
+      - python3-pip
+      - python3-venv
+      # Logging
+      - rsyslog
+      - logrotate
+      # Filesystem / EBS tools
+      - nvme-cli
+      - xfsprogs
+      - e2fsprogs
+
+  tasks:
+
+    # =========================================================================
+    # DEPLOYER IP — detect before any hardening so it can be whitelisted
+    # in UFW and fail2ban, preventing lockout during or after deployment.
+    # =========================================================================
+
+    - name: Get deployer public IPv4 address
+      command: curl -4 -s --max-time 10 ifconfig.me
+      register: deployer_ip_raw
+      delegate_to: localhost
+      become: no
+      changed_when: false
+
+    - name: Set deployer IP fact
+      set_fact:
+        deployer_ip: "{{ deployer_ip_raw.stdout | trim }}"
+
+    - name: Show deployer IP that will be whitelisted
+      debug:
+        msg: "Deployer IP: {{ deployer_ip }} - will be whitelisted in UFW and fail2ban"
+
+    # =========================================================================
+    # PACKAGES
+    # =========================================================================
+
+    - name: Update apt cache and upgrade all packages to latest
+      apt:
+        upgrade: dist
+        update_cache: yes
+        cache_valid_time: 3600
+      register: apt_upgrade
+
+    - name: Check if reboot is required after upgrade
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required_file
+
+    - name: Warn if reboot required
+      debug:
+        msg: "⚠  Reboot required — run: ssh {{ admin_user }}@HOST 'sudo reboot'"
+      when: reboot_required_file.stat.exists
+
+    - name: Install server packages
+      apt:
+        name: "{{ system_packages }}"
+        state: present
+
+    # =========================================================================
+    # EBS DATA VOLUME
+    # Mount the data EBS at apps_root so all app code lives on persistent
+    # storage that survives instance termination.
+    # =========================================================================
+
+    - name: Wait for EBS data volume (NVMe device)
+      wait_for:
+        path: "{{ ebs_nvme_device }}"
+        state: present
+        timeout: 120
+
+    - name: Check if EBS volume already has a filesystem
+      command: "blkid {{ ebs_nvme_device }}"
+      register: ebs_formatted
+      failed_when: false
+      changed_when: false
+
+    - name: Create XFS filesystem on EBS data volume (first run only)
+      command: "mkfs.xfs -f {{ ebs_nvme_device }}"
+      when: ebs_formatted.rc != 0
+
+    - name: Get EBS volume UUID
+      command: "blkid -s UUID -o value {{ ebs_nvme_device }}"
+      register: ebs_uuid
+      changed_when: false
+
+    - name: Create apps root mount point
+      file:
+        path: "{{ apps_root }}"
+        state: directory
+        mode: '0755'
+
+    - name: Mount EBS at apps_root and persist via fstab
+      mount:
+        path: "{{ apps_root }}"
+        src: "UUID={{ ebs_uuid.stdout }}"
+        fstype: xfs
+        opts: defaults,nofail
+        state: mounted
+
+    # Setgid (2xxx) ensures new files/dirs in apps_root inherit the group,
+    # so both the admin user and app runtime users can read/write their dirs.
+    - name: Set apps_root ownership (admin user, setgid)
+      file:
+        path: "{{ apps_root }}"
+        owner: "{{ admin_user }}"
+        group: "{{ admin_user }}"
+        mode: '2755'
+        state: directory
+
+    - name: Create shared log root directory
+      file:
+        path: "{{ logs_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # =========================================================================
+    # SSH HARDENING
+    # =========================================================================
+
+    - name: SSH — Disable password authentication (key-only)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        state: present
+      notify: restart sshd
+
+    - name: SSH — Disable root login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+        state: present
+      notify: restart sshd
+
+    - name: SSH — Limit auth retries to 3
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?MaxAuthTries'
+        line: 'MaxAuthTries 3'
+        state: present
+      notify: restart sshd
+
+    - name: SSH — Disable X11 forwarding
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?X11Forwarding'
+        line: 'X11Forwarding no'
+        state: present
+      notify: restart sshd
+
+    - name: SSH — Set client idle timeout (5 min)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?ClientAliveInterval'
+        line: 'ClientAliveInterval 300'
+        state: present
+      notify: restart sshd
+
+    - name: SSH — Set max keepalive count (disconnect after 2nd missed probe)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?ClientAliveCountMax'
+        line: 'ClientAliveCountMax 2'
+        state: present
+      notify: restart sshd
+
+    # =========================================================================
+    # AUTOMATIC SECURITY UPDATES
+    # =========================================================================
+
+    - name: Configure unattended-upgrades (security patches only)
+      template:
+        src: ../templates/50unattended-upgrades.j2
+        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Enable automatic update downloads and installs
+      template:
+        src: ../templates/20auto-upgrades.j2
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        owner: root
+        group: root
+        mode: '0644'
+
+    # =========================================================================
+    # KERNEL HARDENING (sysctl)
+    # =========================================================================
+
+    - name: Apply kernel security parameters
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        # Reverse path filtering — blocks IP spoofing
+        - { name: 'net.ipv4.conf.all.rp_filter',              value: '1' }
+        - { name: 'net.ipv4.conf.default.rp_filter',          value: '1' }
+        # Ignore broadcast ICMP — prevents smurf attacks
+        - { name: 'net.ipv4.icmp_echo_ignore_broadcasts',     value: '1' }
+        # Disable source routing — prevents routing table manipulation
+        - { name: 'net.ipv4.conf.all.accept_source_route',    value: '0' }
+        - { name: 'net.ipv6.conf.all.accept_source_route',    value: '0' }
+        - { name: 'net.ipv4.conf.default.accept_source_route', value: '0' }
+        - { name: 'net.ipv6.conf.default.accept_source_route', value: '0' }
+        # Disable ICMP redirects — prevents MITM routing attacks
+        - { name: 'net.ipv4.conf.all.send_redirects',         value: '0' }
+        - { name: 'net.ipv4.conf.default.send_redirects',     value: '0' }
+        - { name: 'net.ipv4.conf.all.accept_redirects',       value: '0' }
+        - { name: 'net.ipv6.conf.all.accept_redirects',       value: '0' }
+        # SYN flood protection
+        - { name: 'net.ipv4.tcp_syncookies',                  value: '1' }
+        - { name: 'net.ipv4.tcp_max_syn_backlog',             value: '2048' }
+        - { name: 'net.ipv4.tcp_synack_retries',              value: '2' }
+        - { name: 'net.ipv4.tcp_syn_retries',                 value: '5' }
+        # Log martian packets (source address spoofing)
+        - { name: 'net.ipv4.conf.all.log_martians',           value: '1' }
+        - { name: 'net.ipv4.conf.default.log_martians',       value: '1' }
+        # Disable IPv6 if not in use
+        - { name: 'net.ipv6.conf.all.disable_ipv6',           value: '1' }
+        - { name: 'net.ipv6.conf.default.disable_ipv6',       value: '1' }
+
+    - name: Harden /run/shm (shared memory — noexec, nosuid)
+      lineinfile:
+        path: /etc/fstab
+        line: 'tmpfs /run/shm tmpfs defaults,noexec,nosuid 0 0'
+        state: present
+
+    # =========================================================================
+    # FAIL2BAN — Brute-force protection
+    # =========================================================================
+
+    - name: Deploy fail2ban configuration (SSH + nginx)
+      template:
+        src: ../templates/jail.local.j2
+        dest: /etc/fail2ban/jail.local
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart fail2ban
+
+    - name: Install nginx rate-limit filter for fail2ban
+      copy:
+        dest: /etc/fail2ban/filter.d/nginx-limit-req.conf
+        content: |
+          [Definition]
+          failregex = ^\s*\[error\] \d+#\d+: \*\d+ limiting requests, client: <HOST>,
+          ignoreregex =
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart fail2ban
+
+    - name: Ensure fail2ban is running and enabled
+      service:
+        name: fail2ban
+        state: started
+        enabled: yes
+
+    # =========================================================================
+    # UFW FIREWALL (defense-in-depth alongside AWS Security Group)
+    # =========================================================================
+
+    - name: UFW - Default deny all inbound
+      ufw:
+        default: deny
+        direction: incoming
+
+    - name: UFW - Default allow all outbound
+      ufw:
+        default: allow
+        direction: outgoing
+
+    - name: UFW - Allow ALL traffic from deployer IP (prevents lockout)
+      ufw:
+        rule: allow
+        from_ip: "{{ deployer_ip }}"
+        comment: "Deployer - unrestricted access"
+
+    - name: UFW - Allow SSH (port 22)
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+
+    - name: UFW - Allow HTTP (port 80)
+      ufw:
+        rule: allow
+        port: '80'
+        proto: tcp
+
+    - name: UFW - Allow HTTPS (port 443)
+      ufw:
+        rule: allow
+        port: '443'
+        proto: tcp
+
+    - name: UFW - Enable firewall
+      ufw:
+        state: enabled
+
+    # =========================================================================
+    # DISABLE UNUSED SERVICES
+    # =========================================================================
+
+    - name: Stop and disable unused services
+      service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - apache2
+        - avahi-daemon
+        - cups
+        - bluetooth
+      ignore_errors: yes
+
+    # =========================================================================
+    # NGINX — Shared reverse proxy
+    #
+    # Global config:
+    #   - server_tokens off  (hide nginx version)
+    #   - Conservative timeouts
+    #   - Common security headers
+    #
+    # Default vhost:
+    #   - Returns 444 (close connection) for requests with no matching
+    #     server_name. This prevents hostname probing and drops HTTP requests
+    #     to bare IP addresses.
+    #   - Each app adds its own vhost to sites-available/ and sites-enabled/
+    #     when it is deployed.
+    # =========================================================================
+
+    - name: Install ssl-cert package (provides the snakeoil cert for default vhost)
+      apt:
+        name: ssl-cert
+        state: present
+
+    - name: Write nginx global hardening config
+      copy:
+        dest: /etc/nginx/conf.d/hardening.conf
+        content: |
+          # Global nginx hardening — applied to all vhosts
+          # DO NOT remove; shared by all apps on this server.
+
+          # Hide nginx version from error pages and headers
+          server_tokens off;
+
+          # Default upload limit (apps can override per-vhost)
+          client_max_body_size 25m;
+
+          # Connection timeouts (prevent slow-client attacks)
+          client_body_timeout   12;
+          client_header_timeout 12;
+          keepalive_timeout     15;
+          send_timeout          10;
+
+          # Security headers applied to all responses
+          # Apps can override or extend these in their own vhost blocks.
+          add_header X-Frame-Options        "SAMEORIGIN"                  always;
+          add_header X-Content-Type-Options "nosniff"                     always;
+          add_header X-XSS-Protection       "1; mode=block"               always;
+          add_header Referrer-Policy        "strict-origin-when-cross-origin" always;
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload nginx
+
+    - name: Write nginx default-deny vhost
+      copy:
+        dest: /etc/nginx/sites-available/default-deny
+        content: |
+          # Default server — silently drop connections for unknown domains.
+          #
+          # Any HTTP/HTTPS request that does not match a deployed app's
+          # server_name block is handled here: the connection is closed
+          # immediately with no response body (nginx return code 444).
+          #
+          # This prevents:
+          #   - Hostname probing / subdomain enumeration
+          #   - IP-direct access to apps
+          #   - Accidental exposure of the nginx default page
+          #
+          # DO NOT remove this file. Each app adds its own vhost alongside
+          # this one in sites-enabled/.
+
+          server {
+              listen 80  default_server;
+              listen [::]:80  default_server;
+              server_name _;
+              return 444;
+          }
+
+          server {
+              listen 443 ssl default_server;
+              listen [::]:443 ssl default_server;
+              server_name _;
+
+              # Self-signed snakeoil cert for the catch-all SSL block.
+              # Deployed apps serve from their own Let's Encrypt certificates.
+              ssl_certificate     /etc/ssl/certs/ssl-cert-snakeoil.pem;
+              ssl_certificate_key /etc/ssl/private/ssl-cert-snakeoil.key;
+
+              return 444;
+          }
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload nginx
+
+    - name: Enable default-deny vhost
+      file:
+        src: /etc/nginx/sites-available/default-deny
+        dest: /etc/nginx/sites-enabled/default-deny
+        state: link
+      notify: reload nginx
+
+    - name: Remove nginx default page vhost
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: reload nginx
+
+    - name: Test nginx configuration
+      command: nginx -t
+      changed_when: false
+      register: nginx_config_test
+      failed_when: nginx_config_test.rc != 0
+
+    - name: Ensure nginx is started and enabled
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    # =========================================================================
+    # SUPERVISOR — Shared process manager
+    # Installed and running; empty of programs.
+    # Each app deployment adds its own .conf to /etc/supervisor/conf.d/.
+    # =========================================================================
+
+    - name: Ensure supervisor is started and enabled
+      service:
+        name: supervisor
+        state: started
+        enabled: yes
+
+    # =========================================================================
+    # SYSTEM LOGGING
+    # =========================================================================
+
+    - name: Ensure rsyslog is installed and running
+      service:
+        name: rsyslog
+        state: started
+        enabled: yes
+
+    - name: Configure system log rotation
+      template:
+        src: ../templates/rsyslog-rotation.j2
+        dest: /etc/logrotate.d/rsyslog
+        owner: root
+        group: root
+        mode: '0644'
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+
+    - name: Display server hardening summary
+      debug:
+        msg: |
+
+          ╔══════════════════════════════════════════════════════════╗
+          ║   Server Foundation Ready - {{ host_name }}
+          ╚══════════════════════════════════════════════════════════╝
+
+            EBS Volume:
+              Device:    {{ ebs_nvme_device }}
+              Mount:     {{ apps_root }}  (all app code + data)
+              Logs:      {{ logs_root }}  (all app logs)
+              Size:      {{ ebs_volume_size }} GB {{ ebs_volume_type }}
+              Encrypted: {{ ebs_volume_encrypted }}
+
+            Security:
+              SSH         - key-only auth, no root, 3 retries, 5-min idle timeout
+              UFW         - default deny; ports 22, 80, 443 open
+              Sysctl      - IP spoofing, SYN flood, redirect mitigations
+              Auto-update - unattended security patches enabled
+              Fail2ban    - nginx attack/rate-limit protection active
+              /run/shm    - noexec, nosuid
+
+            Shared services:
+              nginx      - running, server_tokens off, default-deny vhost active
+              supervisor - running, no programs (apps add their own)
+              rsyslog    - system logging active
+
+            Deploy an app:
+              ansible-playbook playbooks/setup.yml --vault-password-file ~/.vault_pass
+
+          {{ '  ⚠  REBOOT REQUIRED - run: sudo reboot' if reboot_required_file.stat.exists else '  No reboot required.' }}
+
+  handlers:
+    - name: restart sshd
+      service:
+        name: ssh
+        state: restarted
+
+    - name: restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted
+
+    - name: reload nginx
+      service:
+        name: nginx
+        state: reloaded

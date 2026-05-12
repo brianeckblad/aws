@@ -1,0 +1,84 @@
+---
+# create-ssh-key.yml — SSH key pair for the shared EC2 server
+#
+# Creates one key pair for the entire server (not per-app).
+# The key is named host_name-key and stored at ~/.ssh/host_name-key.pem.
+#
+# SECURITY:
+#   - Private key is generated once and stored locally only
+#   - AWS does not keep a copy — never lose this file
+#   - Permissions are set to 0400 (owner read-only)
+#   - Never commit the .pem file to git
+#
+# Recovery if key is lost:
+#   1. AWS Systems Manager Session Manager (no SSH key required)
+#   2. Create an AMI snapshot → launch replacement instance with new key
+#
+# Usage: ansible-playbook playbooks/create-ssh-key.yml \
+#          --vault-password-file ~/.vault_pass
+
+- name: Create SSH Key Pair for Shared Server
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+    - name: Ensure ~/.ssh directory exists
+      file:
+        path: "~/.ssh"
+        state: directory
+        mode: '0700'
+
+    - name: Check if SSH key already exists locally
+      stat:
+        path: "{{ ssh_key_file }}"
+      register: ssh_key_file_stat
+
+    - name: Create SSH key pair in AWS
+      amazon.aws.ec2_key:
+        name: "{{ ssh_key_name }}"
+        region: "{{ aws_region }}"
+        state: present
+        tags:
+          Server: "{{ host_name }}"
+          Environment: production
+          ManagedBy: Ansible
+      register: key_pair
+
+    - name: Save private key locally (only on first creation)
+      copy:
+        content: "{{ key_pair.key.private_key }}"
+        dest: "{{ ssh_key_file }}"
+        mode: '0400'
+        backup: yes
+      when: key_pair.changed
+
+    - name: Enforce correct key file permissions
+      file:
+        path: "{{ ssh_key_file }}"
+        mode: '0400'
+        state: file
+      when: ssh_key_file_stat.stat.exists or key_pair.changed
+
+    - name: Get key fingerprint from AWS
+      amazon.aws.ec2_key_info:
+        names:
+          - "{{ ssh_key_name }}"
+        region: "{{ aws_region }}"
+      register: key_info
+
+    - name: Display SSH key summary
+      debug:
+        msg: |
+
+          ✓ SSH Key: {{ ssh_key_name }}
+            Fingerprint: {{ key_info.keys[0].key_fingerprint | default('N/A') }}
+            Local file:  {{ ssh_key_file }}  (mode 0400)
+
+            SSH access:
+              ssh -i {{ ssh_key_file }} ubuntu@<SERVER_IP>
+
+            ⚠  Keep this key safe - there is no recovery without it
+               (unless AWS Systems Manager Session Manager is configured)

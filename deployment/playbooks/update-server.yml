@@ -1,0 +1,308 @@
+---
+# update-server.yml — Apply system changes to a running server
+#
+# Use this after the server is already provisioned to:
+#   - Upgrade OS packages
+#   - Install any newly added system_packages
+#   - Re-apply nginx, fail2ban, sysctl, SSH config (idempotent)
+#   - Reload/restart services as needed
+#   - Warn if a reboot is required
+#
+# Safe to re-run at any time. Skips initial-setup-only tasks
+# (EBS formatting, volume mounting, service installation).
+#
+# Usage:
+#   ansible-playbook playbooks/update-server.yml \
+#     --vault-password-file ~/.vault_pass
+
+- name: Update Server — OS packages and configuration
+  hosts: all
+  become: yes
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  vars:
+    system_packages:
+      # Core utilities
+      - curl
+      - wget
+      - git
+      - unzip
+      - htop
+      - tree
+      - jq
+      # Security
+      - ufw
+      - fail2ban
+      - unattended-upgrades
+      - apt-listchanges
+      # Web / process management
+      - nginx
+      - supervisor
+      # Python runtime
+      - python3
+      - python3-pip
+      - python3-venv
+      # Logging
+      - rsyslog
+      - logrotate
+      # Filesystem / EBS tools
+      - nvme-cli
+      - xfsprogs
+      - e2fsprogs
+
+  tasks:
+
+    # =========================================================================
+    # PACKAGES
+    # =========================================================================
+
+    - name: Update apt cache and upgrade all packages
+      apt:
+        upgrade: dist
+        update_cache: yes
+        cache_valid_time: 0      # always refresh on an explicit update run
+      register: apt_upgrade
+
+    - name: Ensure all system packages are present
+      apt:
+        name: "{{ system_packages }}"
+        state: present
+
+    - name: Remove unused packages
+      apt:
+        autoremove: yes
+        purge: yes
+
+    - name: Check if reboot is required
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required_file
+
+    - name: Warn if reboot required
+      debug:
+        msg: "⚠  Reboot required — run: ssh {{ admin_user }}@{{ ansible_host }} 'sudo reboot'"
+      when: reboot_required_file.stat.exists
+
+    # =========================================================================
+    # SSH HARDENING — re-apply in case sshd_config was modified
+    # =========================================================================
+
+    - name: SSH — Disable password authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+      notify: restart sshd
+
+    - name: SSH — Disable root login
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+      notify: restart sshd
+
+    - name: SSH — Limit auth retries
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?MaxAuthTries'
+        line: 'MaxAuthTries 3'
+      notify: restart sshd
+
+    - name: SSH — Disable X11 forwarding
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?X11Forwarding'
+        line: 'X11Forwarding no'
+      notify: restart sshd
+
+    - name: SSH — Client idle timeout
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?ClientAliveInterval'
+        line: 'ClientAliveInterval 300'
+      notify: restart sshd
+
+    - name: SSH — Max keepalive count
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?ClientAliveCountMax'
+        line: 'ClientAliveCountMax 2'
+      notify: restart sshd
+
+    # =========================================================================
+    # AUTOMATIC SECURITY UPDATES
+    # =========================================================================
+
+    - name: Configure unattended-upgrades
+      template:
+        src: ../templates/50unattended-upgrades.j2
+        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Enable automatic update downloads and installs
+      template:
+        src: ../templates/20auto-upgrades.j2
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        owner: root
+        group: root
+        mode: '0644'
+
+    # =========================================================================
+    # KERNEL HARDENING — re-apply sysctl params
+    # =========================================================================
+
+    - name: Apply kernel security parameters
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { name: 'net.ipv4.conf.all.rp_filter',               value: '1' }
+        - { name: 'net.ipv4.conf.default.rp_filter',           value: '1' }
+        - { name: 'net.ipv4.icmp_echo_ignore_broadcasts',      value: '1' }
+        - { name: 'net.ipv4.conf.all.accept_source_route',     value: '0' }
+        - { name: 'net.ipv6.conf.all.accept_source_route',     value: '0' }
+        - { name: 'net.ipv4.conf.default.accept_source_route', value: '0' }
+        - { name: 'net.ipv6.conf.default.accept_source_route', value: '0' }
+        - { name: 'net.ipv4.conf.all.send_redirects',          value: '0' }
+        - { name: 'net.ipv4.conf.default.send_redirects',      value: '0' }
+        - { name: 'net.ipv4.conf.all.accept_redirects',        value: '0' }
+        - { name: 'net.ipv6.conf.all.accept_redirects',        value: '0' }
+        - { name: 'net.ipv4.tcp_syncookies',                   value: '1' }
+        - { name: 'net.ipv4.tcp_max_syn_backlog',              value: '2048' }
+        - { name: 'net.ipv4.tcp_synack_retries',               value: '2' }
+        - { name: 'net.ipv4.tcp_syn_retries',                  value: '5' }
+        - { name: 'net.ipv4.conf.all.log_martians',            value: '1' }
+        - { name: 'net.ipv4.conf.default.log_martians',        value: '1' }
+        - { name: 'net.ipv6.conf.all.disable_ipv6',            value: '1' }
+        - { name: 'net.ipv6.conf.default.disable_ipv6',        value: '1' }
+
+    # =========================================================================
+    # FAIL2BAN
+    # =========================================================================
+
+    - name: Update fail2ban configuration
+      template:
+        src: ../templates/jail.local.j2
+        dest: /etc/fail2ban/jail.local
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart fail2ban
+
+    - name: Ensure fail2ban is running and enabled
+      service:
+        name: fail2ban
+        state: started
+        enabled: yes
+
+    # =========================================================================
+    # NGINX
+    # =========================================================================
+
+    - name: Update nginx hardening config
+      copy:
+        dest: /etc/nginx/conf.d/hardening.conf
+        content: |
+          # Global nginx hardening — applied to all vhosts
+          # DO NOT remove; shared by all apps on this server.
+
+          server_tokens off;
+          client_max_body_size 25m;
+
+          client_body_timeout   12;
+          client_header_timeout 12;
+          keepalive_timeout     15;
+          send_timeout          10;
+
+          add_header X-Frame-Options        "SAMEORIGIN"                      always;
+          add_header X-Content-Type-Options "nosniff"                         always;
+          add_header X-XSS-Protection       "1; mode=block"                   always;
+          add_header Referrer-Policy        "strict-origin-when-cross-origin" always;
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload nginx
+
+    - name: Test nginx configuration
+      command: nginx -t
+      changed_when: false
+      register: nginx_test
+      failed_when: nginx_test.rc != 0
+
+    - name: Ensure nginx is running and enabled
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    # =========================================================================
+    # SUPERVISOR
+    # =========================================================================
+
+    - name: Ensure supervisor is running and enabled
+      service:
+        name: supervisor
+        state: started
+        enabled: yes
+
+    # =========================================================================
+    # LOGGING
+    # =========================================================================
+
+    - name: Update log rotation config
+      template:
+        src: ../templates/rsyslog-rotation.j2
+        dest: /etc/logrotate.d/rsyslog
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Ensure rsyslog is running and enabled
+      service:
+        name: rsyslog
+        state: started
+        enabled: yes
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+
+    - name: Display update summary
+      debug:
+        msg: |
+
+          ╔══════════════════════════════════════════════════════════╗
+          ║   Server Updated - {{ host_name }}
+          ╚══════════════════════════════════════════════════════════╝
+
+            Packages:   upgraded + autoremoved
+            SSH config: re-applied
+            sysctl:     re-applied
+            fail2ban:   config updated
+            nginx:      hardening config updated
+            logrotate:  config updated
+
+          {{ '  ⚠  REBOOT REQUIRED — run: ssh ' + admin_user + '@' + ansible_host + ' sudo reboot' if reboot_required_file.stat.exists else '  ✓  No reboot required.' }}
+
+  handlers:
+    - name: restart sshd
+      service:
+        name: ssh
+        state: restarted
+
+    - name: restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted
+
+    - name: reload nginx
+      service:
+        name: nginx
+        state: reloaded
+

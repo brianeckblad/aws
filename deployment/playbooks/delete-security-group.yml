@@ -1,0 +1,35 @@
+---
+# Playbook to delete security group
+# Counterpart to: create-security-group.yml
+#
+# NOTE: EC2 instances using this security group must be terminated first
+#
+# Usage: ansible-playbook playbooks/delete-security-group.yml --vault-password-file ~/.vault_pass
+#
+# To recreate: ansible-playbook playbooks/create-security-group.yml --vault-password-file ~/.vault_pass
+
+- name: Delete Security Group
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+    - name: Delete security group
+      amazon.aws.ec2_security_group:
+        name: "{{ security_group_name }}"
+        region: "{{ aws_region }}"
+        state: absent
+      register: sg_delete
+      retries: 3
+      delay: 10
+      until: sg_delete is not failed
+
+    - name: Display result
+      debug:
+        msg:
+          - "✓ Security group deleted: {{ security_group_name }}"
+          - ""
+          - "To recreate:"
+          - "  ansible-playbook playbooks/create-security-group.yml --vault-password-file ~/.vault_pass"

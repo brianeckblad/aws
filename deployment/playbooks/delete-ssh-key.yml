@@ -1,0 +1,35 @@
+---
+# Playbook to delete SSH key pair from AWS and local machine
+# Counterpart to: create-ssh-key.yml
+#
+# Usage: ansible-playbook playbooks/delete-ssh-key.yml --vault-password-file ~/.vault_pass
+#
+# To recreate: ansible-playbook playbooks/create-ssh-key.yml --vault-password-file ~/.vault_pass
+
+- name: Delete SSH Key Pair
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+    - name: Delete SSH key pair from AWS
+      amazon.aws.ec2_key:
+        name: "{{ ssh_key_name }}"
+        region: "{{ aws_region }}"
+        state: absent
+
+    - name: Delete local SSH key file
+      file:
+        path: "{{ ssh_key_file }}"
+        state: absent
+
+    - name: Display result
+      debug:
+        msg:
+          - "✓ SSH key pair deleted from AWS: {{ ssh_key_name }}"
+          - "✓ Local key file removed: {{ ssh_key_file }}"
+          - ""
+          - "To recreate:"
+          - "  ansible-playbook playbooks/create-ssh-key.yml --vault-password-file ~/.vault_pass"

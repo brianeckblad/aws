@@ -1,0 +1,132 @@
+---
+# create-iam-deployer-user.yml — IAM deployer user for Ansible automation
+#
+# Run this ONCE with temporary root credentials before any other playbook.
+# Creates a scoped IAM user ({{ host_name }}-deployer) with the minimum
+# permissions required to provision and manage the EC2 server infrastructure.
+#
+# Policies attached:
+#   AmazonEC2FullAccess        — provision/terminate EC2, security groups, key pairs
+#   AmazonS3FullAccess         — S3 bucket operations
+#   IAMFullAccess              — create/delete IAM roles and instance profiles
+#   SecretsManagerReadWrite    — read/write Secrets Manager secrets
+#   CloudWatchLogsFullAccess   — create log groups and streams
+#
+# After running:
+#   1. Copy the access key output to `aws configure` (replace root credentials)
+#   2. Delete the root access key from the AWS console
+#   3. Verify: aws sts get-caller-identity
+#
+# Usage:
+#   ansible-playbook playbooks/create-iam-deployer-user.yml \
+#     --vault-password-file ~/.vault_pass
+
+- name: Create IAM Deployer User
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/vault.yml
+
+  vars:
+    deployer_user_name: "{{ host_name }}-deployer"
+    deployer_managed_policies:
+      - "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
+      - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+      - "arn:aws:iam::aws:policy/IAMFullAccess"
+      - "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
+      - "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # IAM User
+    # -------------------------------------------------------------------------
+    - name: Create deployer IAM user
+      amazon.aws.iam_user:
+        name: "{{ deployer_user_name }}"
+        state: present
+        tags:
+          Server: "{{ host_name }}"
+          Purpose: ansible-deployer
+          ManagedBy: Ansible
+
+    # -------------------------------------------------------------------------
+    # Attach managed policies
+    # -------------------------------------------------------------------------
+    - name: Attach each managed policy
+      ansible.builtin.command:
+        cmd: >
+          aws iam attach-user-policy
+          --user-name {{ deployer_user_name }}
+          --policy-arn {{ item }}
+          --region {{ aws_region }}
+      loop: "{{ deployer_managed_policies }}"
+      changed_when: true
+
+    # -------------------------------------------------------------------------
+    # Access key — delete any existing key then create fresh via CLI so the
+    # secret is always returned.  The amazon.aws.iam_access_key module
+    # inconsistently omits secret_access_key; the CLI always returns it.
+    # -------------------------------------------------------------------------
+    - name: List existing access keys for deployer user
+      ansible.builtin.command:
+        cmd: >
+          aws iam list-access-keys
+          --user-name {{ deployer_user_name }}
+          --query 'AccessKeyMetadata[*].AccessKeyId'
+          --output text
+          --region {{ aws_region }}
+      register: existing_key_ids
+      changed_when: false
+
+    - name: Delete existing access keys (so a fresh key with visible secret can be created)
+      ansible.builtin.command:
+        cmd: >
+          aws iam delete-access-key
+          --user-name {{ deployer_user_name }}
+          --access-key-id {{ item }}
+          --region {{ aws_region }}
+      loop: "{{ existing_key_ids.stdout.split() }}"
+      when: existing_key_ids.stdout | length > 0
+      changed_when: true
+
+    - name: Create access key for deployer user
+      ansible.builtin.command:
+        cmd: >
+          aws iam create-access-key
+          --user-name {{ deployer_user_name }}
+          --region {{ aws_region }}
+          --output json
+      register: access_key_raw
+      changed_when: true
+      no_log: true   # suppress key material from plain-text logs
+
+    - name: Store access key credentials
+      ansible.builtin.set_fact:
+        deployer_key_id: "{{ (access_key_raw.stdout | from_json).AccessKey.AccessKeyId }}"
+        deployer_secret_key: "{{ (access_key_raw.stdout | from_json).AccessKey.SecretAccessKey }}"
+      no_log: true
+
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+    - name: Display deployer user summary
+      debug:
+        msg: |
+
+          ✓ IAM User: {{ deployer_user_name }}
+
+            Policies:
+              AmazonEC2FullAccess
+              AmazonS3FullAccess
+              IAMFullAccess
+              SecretsManagerReadWrite
+              CloudWatchLogsFullAccess
+
+            ⚠  Access Key (save this now — shown only once):
+              Access Key ID:     {{ deployer_key_id }}
+              Secret Access Key: {{ deployer_secret_key }}
+
+            Next steps:
+              1.  aws configure   (enter the key above, replace root credentials)
+              2.  aws sts get-caller-identity   (verify ARN shows {{ deployer_user_name }})
+              3.  Delete the root access key from the AWS console

@@ -1,0 +1,19 @@
+# ============================================================================
+# Deployment Requirements
+# ============================================================================
+# Install: pip install -r requirements.txt
+#
+# These packages are required on the LOCAL machine to run Ansible playbooks.
+# Nothing here is installed on the remote EC2 server.
+# ============================================================================
+
+# Ansible core engine
+ansible
+ansible-core
+# AWS SDK — required by the amazon.aws Ansible collection
+boto3
+botocore
+# Vault encryption/decryption
+cryptography
+# Used by deployment scripts (decommission.sh JSON parsing, local-dev-setup.sh)
+requests

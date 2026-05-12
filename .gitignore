@@ -1,0 +1,42 @@
+# ============================================================================
+# Secrets & local config — never commit these
+# ============================================================================
+
+# Encrypted vault (contains all credentials and config)
+deployment/group_vars/vault.yml
+deployment/group_vars/vault.yml.decrypted.*
+
+# Live inventory (auto-generated with server IP on deploy)
+deployment/inventories/hosts.yml
+
+# ============================================================================
+# Generated files
+# ============================================================================
+
+# Instance detail files (created by launch-ec2-instance.yml)
+deployment/instances/*.txt
+
+# Backup files created by local-dev-setup.sh
+deployment/group_vars/*.backup.*
+deployment/group_vars/*.merged
+
+# ============================================================================
+# Python
+# ============================================================================
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# ============================================================================
+# macOS / IDE
+# ============================================================================
+.DS_Store
+.idea/
+*.swp
+*.swo
+

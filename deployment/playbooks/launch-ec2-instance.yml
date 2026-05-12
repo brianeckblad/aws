@@ -1,0 +1,410 @@
+---
+# launch-ec2-instance.yml — Launch the shared EC2 instance
+#
+# Launches a single EC2 instance with two EBS volumes:
+#   Root  (8 GB gp3)             — OS, /home (deleted on termination)
+#   Data  (ebs_volume_size gp3)  — all app code + data, mounted at apps_root
+#                                   (SURVIVES instance termination by default)
+#
+# Prerequisites:
+#   - Security group created (create-security-group.yml)
+#   - IAM role created       (create-iam-role.yml)
+#   - SSH key created        (create-ssh-key.yml)
+#
+# After launch:
+#   - inventories/hosts.yml is auto-updated with the server IP
+#   - instances/{id}.txt contains full instance details
+#   - SSH connectivity is verified before exiting
+#
+# Instance type requirement:
+#   Nitro-based instances (t3, t3a, t4g, m5, m6, c5, c6i, r5, r6i …) present
+#   EBS volumes as NVMe devices (/dev/nvme1n1). Older types (t2, m4) use
+#   /dev/xvdf. Update ebs_nvme_device in vault.yml if using a non-Nitro type.
+#
+# Usage: ansible-playbook playbooks/launch-ec2-instance.yml \
+#          --vault-password-file ~/.vault_pass
+
+- name: Launch EC2 Instance
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  vars:
+    instance_type: "{{ ec2_instance_type | default('t3.small') }}"
+    ami_owner: "099720109477"   # Canonical (Ubuntu)
+    ami_name: "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
+
+  tasks:
+    # -----------------------------------------------------------------
+    # Safety check — warn if a server with this host_name already exists
+    # -----------------------------------------------------------------
+    - name: Check for existing instance with this host_name
+      amazon.aws.ec2_instance_info:
+        filters:
+          "tag:Name": "{{ host_name }}"
+          "instance-state-name":
+            - pending
+            - running
+            - stopping
+            - stopped
+        region: "{{ aws_region }}"
+      register: existing_instances
+
+    - name: Warn if an instance already exists
+      debug:
+        msg:
+          - "⚠  {{ existing_instances.instances | length }} existing instance(s) named '{{ host_name }}':"
+          - "{% for i in existing_instances.instances %}  {{ i.instance_id }}  {{ i.state.name }}  {{ i.public_ip_address | default('no IP') }}{% endfor %}"
+          - ""
+          - "A NEW instance will be launched alongside the existing one."
+          - "Terminate the old instance after migration:"
+          - "  ansible-playbook playbooks/terminate-ec2-instance.yml"
+      when: existing_instances.instances | length > 0
+
+    - name: Remove legacy instance-info.txt (replaced by instances/{id}.txt)
+      file:
+        path: "{{ playbook_dir }}/../instance-info.txt"
+        state: absent
+
+    # -----------------------------------------------------------------
+    # Find latest Ubuntu 24.04 LTS AMI
+    # -----------------------------------------------------------------
+    - name: Get latest Ubuntu 24.04 AMI
+      amazon.aws.ec2_ami_info:
+        region: "{{ aws_region }}"
+        owners: "{{ ami_owner }}"
+        filters:
+          name: "{{ ami_name }}"
+      register: amis
+
+    - name: Set AMI ID and root device
+      set_fact:
+        ami_id: "{{ (amis.images | sort(attribute='creation_date') | last).image_id }}"
+        ami_root_device: "{{ (amis.images | sort(attribute='creation_date') | last).root_device_name }}"
+
+    # -----------------------------------------------------------------
+    # Build EBS volume configuration
+    # Root volume — OS boot disk; deleted when instance terminates
+    # Data volume — apps_root; survives instance termination
+    # -----------------------------------------------------------------
+    - name: Build EBS volume list
+      set_fact:
+        instance_volumes:
+          - device_name: "{{ ami_root_device }}"
+            ebs:
+              volume_size: 8
+              volume_type: gp3
+              delete_on_termination: "{{ ebs_boot_delete_on_termination }}"
+          - device_name: "{{ ebs_device_name }}"
+            ebs:
+              volume_size: "{{ ebs_volume_size }}"
+              volume_type: "{{ ebs_volume_type }}"
+              delete_on_termination: "{{ ebs_data_delete_on_termination }}"
+              encrypted: "{{ ebs_volume_encrypted }}"
+              snapshot_id: "{{ ebs_volume_snapshot_id if ebs_volume_snapshot_id else omit }}"
+
+    # -----------------------------------------------------------------
+    # Launch the instance
+    # -----------------------------------------------------------------
+    - name: Launch EC2 instance
+      amazon.aws.ec2_instance:
+        name: "{{ host_name }}"
+        instance_type: "{{ instance_type }}"
+        image_id: "{{ ami_id }}"
+        region: "{{ aws_region }}"
+        key_name: "{{ ssh_key_name }}"
+        security_group: "{{ security_group_name }}"
+        iam_instance_profile: "{{ iam_instance_profile_name }}"
+        volumes: "{{ instance_volumes }}"
+        network:
+          assign_public_ip: "{{ assign_public_ip }}"
+        detailed_monitoring: "{{ ec2_monitoring_enabled }}"
+        termination_protection: "{{ ec2_termination_protection }}"
+        ebs_optimized: "{{ ec2_ebs_optimized }}"
+        source_dest_check: "{{ ec2_source_dest_check }}"
+        wait: yes
+        wait_timeout: 300
+        tags:
+          Name: "{{ host_name }}"
+          Server: "{{ host_name }}"
+          Environment: production
+          ManagedBy: Ansible
+          AppsRoot: "{{ apps_root }}"
+          CreatedDate: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+          TerminationProtection: "{{ 'Yes' if ec2_termination_protection else 'No' }}"
+          Monitoring: "{{ 'Detailed' if ec2_monitoring_enabled else 'Basic' }}"
+      register: ec2
+
+    - name: Extract instance details
+      set_fact:
+        instance_ip: "{{ ec2.instances[0].public_ip_address }}"
+        instance_id: "{{ ec2.instances[0].instance_id }}"
+        private_ip: "{{ ec2.instances[0].private_ip_address }}"
+        vpc_id: "{{ ec2.instances[0].vpc_id }}"
+        subnet_id: "{{ ec2.instances[0].subnet_id }}"
+        security_groups: "{{ ec2.instances[0].security_groups | map(attribute='group_name') | list }}"
+        instance_state: "{{ ec2.instances[0].state.name }}"
+
+    # -----------------------------------------------------------------
+    # Tag the EBS volumes for easy identification in the AWS console
+    # -----------------------------------------------------------------
+    - name: Get root volume ID
+      shell: >
+        aws ec2 describe-volumes
+        --region {{ aws_region }}
+        --filters
+        "Name=attachment.instance-id,Values={{ instance_id }}"
+        "Name=attachment.device,Values={{ ami_root_device }}"
+        --query "Volumes[0].VolumeId"
+        --output text
+      register: root_vol
+      changed_when: false
+
+    - name: Get data volume ID
+      shell: >
+        aws ec2 describe-volumes
+        --region {{ aws_region }}
+        --filters
+        "Name=attachment.instance-id,Values={{ instance_id }}"
+        "Name=attachment.device,Values={{ ebs_device_name }}"
+        --query "Volumes[0].VolumeId"
+        --output text
+      register: data_vol
+      changed_when: false
+
+    - name: Tag root (boot) volume
+      amazon.aws.ec2_tag:
+        region: "{{ aws_region }}"
+        resource: "{{ root_vol.stdout }}"
+        tags:
+          Name: "{{ ebs_boot_volume_name }}"
+          Server: "{{ host_name }}"
+          Role: boot
+          ManagedBy: Ansible
+      when: root_vol.stdout != "None"
+
+    - name: Tag data volume
+      amazon.aws.ec2_tag:
+        region: "{{ aws_region }}"
+        resource: "{{ data_vol.stdout }}"
+        tags:
+          Name: "{{ ebs_data_volume_name }}"
+          Server: "{{ host_name }}"
+          Role: data
+          MountPoint: "{{ apps_root }}"
+          DeleteOnTermination: "{{ ebs_data_delete_on_termination | string }}"
+          ManagedBy: Ansible
+      when: data_vol.stdout != "None"
+
+    # -----------------------------------------------------------------
+    # Wait for SSH to become available before continuing
+    # -----------------------------------------------------------------
+    - name: Wait for SSH to become available
+      wait_for:
+        host: "{{ instance_ip }}"
+        port: 22
+        delay: 30
+        timeout: 300
+        state: started
+
+    # -----------------------------------------------------------------
+    # Update the Ansible inventory with the new server IP
+    # -----------------------------------------------------------------
+    - name: Update inventory file
+      copy:
+        content: |
+          # ============================================================================
+          # Server Inventory — AUTO-GENERATED by launch-ec2-instance.yml
+          # Last updated: {{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}
+          # Server: {{ host_name }}  IP: {{ instance_ip }}
+          #
+          # This file is gitignored. Template: inventories/hosts.yml.example
+          # ============================================================================
+
+          all:
+            children:
+              app_servers:
+                children:
+                  production:
+                    hosts:
+                      server:
+                        ansible_host: {{ instance_ip }}
+                        ansible_connection: ssh
+                        ansible_user: ubuntu
+                        ansible_ssh_private_key_file: {{ ssh_key_file }}
+
+            vars:
+              ansible_user: ubuntu
+              ansible_python_interpreter: /usr/bin/python3
+        dest: "{{ playbook_dir }}/../inventories/hosts.yml"
+
+    - name: Remove stale inventory backup files
+      shell: "rm -f {{ playbook_dir }}/../inventories/hosts.yml.*~"
+      changed_when: false
+
+    # -----------------------------------------------------------------
+    # Save detailed instance information to a local reference file
+    # -----------------------------------------------------------------
+    - name: Save instance information file
+      copy:
+        content: |
+          ════════════════════════════════════════════════════════════
+          EC2 INSTANCE — {{ host_name }}
+          Created: {{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}
+          ════════════════════════════════════════════════════════════
+
+          Instance ID:          {{ instance_id }}
+          Instance Type:        {{ instance_type }}
+          State:                {{ instance_state }}
+          Availability Zone:    {{ ec2.instances[0].placement.availability_zone }}
+          Region:               {{ aws_region }}
+          AMI:                  {{ ami_id }} (Ubuntu 24.04 LTS)
+
+          ────────────────────────────────────────────────────────────
+          NETWORKING
+          ────────────────────────────────────────────────────────────
+
+          Public IP:            {{ instance_ip }}
+          Private IP:           {{ private_ip }}
+          VPC:                  {{ vpc_id }}
+          Subnet:               {{ subnet_id }}
+          Security Groups:      {{ security_groups | join(', ') }}
+
+          ────────────────────────────────────────────────────────────
+          SSH ACCESS
+          ────────────────────────────────────────────────────────────
+
+          SSH User:             ubuntu
+          SSH Key File:         {{ ssh_key_file }}
+          SSH Command:          ssh -i {{ ssh_key_file }} ubuntu@{{ instance_ip }}
+
+          ────────────────────────────────────────────────────────────
+          STORAGE
+          ────────────────────────────────────────────────────────────
+
+          Root Volume ({{ ebs_boot_volume_name }}):
+            Volume ID:          {{ root_vol.stdout }}
+            Size:               8 GB gp3
+            Mount:              / (OS)
+            Delete on terminate: {{ ebs_boot_delete_on_termination }}
+
+          Data Volume ({{ ebs_data_volume_name }}):
+            Volume ID:          {{ data_vol.stdout }}
+            Device:             {{ ebs_device_name }} → {{ ebs_nvme_device }} (NVMe)
+            Size:               {{ ebs_volume_size }} GB {{ ebs_volume_type }}
+            Encrypted:          {{ ebs_volume_encrypted }}
+            Mount Point:        {{ apps_root }}  (all app code lives here)
+            Delete on terminate: {{ ebs_data_delete_on_termination }} {{ '⚠  volume deleted with instance' if ebs_data_delete_on_termination else '✓ volume SURVIVES instance termination' }}
+
+          ────────────────────────────────────────────────────────────
+          IAM / SECURITY
+          ────────────────────────────────────────────────────────────
+
+          IAM Role:             {{ iam_role_name }}
+          Instance Profile:     {{ iam_instance_profile_name }}
+          SSM Session Manager:  enabled (access without SSH key)
+          Termination protect:  {{ 'enabled' if ec2_termination_protection else 'disabled' }}
+
+          ────────────────────────────────────────────────────────────
+          NEXT STEPS
+          ────────────────────────────────────────────────────────────
+
+          1. Harden the server (runs automatically via provision-server.yml):
+             ansible-playbook playbooks/harden-server.yml
+
+          2. Deploy an app to this server:
+             ansible-playbook playbooks/setup.yml --vault-password-file ~/.vault_pass
+
+          ────────────────────────────────────────────────────────────
+          USEFUL COMMANDS
+          ────────────────────────────────────────────────────────────
+
+          SSH:
+            ssh -i {{ ssh_key_file }} ubuntu@{{ instance_ip }}
+
+          SSM Session Manager (no key required):
+            aws ssm start-session --target {{ instance_id }} --region {{ aws_region }}
+
+          Console output:
+            aws ec2 get-console-output --instance-id {{ instance_id }} --region {{ aws_region }}
+
+          Stop:
+            aws ec2 stop-instances --instance-ids {{ instance_id }} --region {{ aws_region }}
+
+          Start:
+            aws ec2 start-instances --instance-ids {{ instance_id }} --region {{ aws_region }}
+
+          ════════════════════════════════════════════════════════════
+        dest: "{{ playbook_dir }}/../instances/{{ instance_id }}.txt"
+
+    - name: Remove stale instance info backup files
+      shell: "rm -f {{ playbook_dir }}/../instances/{{ instance_id }}.txt.*~"
+      changed_when: false
+
+    # -----------------------------------------------------------------
+    # Post-launch validation
+    # -----------------------------------------------------------------
+    - name: Validate SSH connectivity
+      command: >
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15
+        -i {{ ssh_key_file }}
+        ubuntu@{{ instance_ip }} echo "SSH_OK"
+      register: ssh_check
+      retries: 3
+      delay: 10
+      until: ssh_check.rc == 0
+      changed_when: false
+
+    - name: Validate EBS data volume is visible on instance
+      command: >
+        ssh -o StrictHostKeyChecking=no
+        -i {{ ssh_key_file }}
+        ubuntu@{{ instance_ip }} test -b {{ ebs_nvme_device }}
+      register: ebs_check
+      failed_when: false
+      changed_when: false
+
+    - name: Validate IAM instance profile is attached
+      command: >
+        aws ec2 describe-instances
+        --instance-ids {{ instance_id }}
+        --region {{ aws_region }}
+        --query "Reservations[0].Instances[0].IamInstanceProfile.Arn"
+        --output text
+      register: iam_check
+      changed_when: false
+
+    - name: Validate security group ports
+      shell: >
+        aws ec2 describe-security-groups
+        --group-names {{ security_group_name }}
+        --region {{ aws_region }}
+        --query "SecurityGroups[0].IpPermissions[].FromPort"
+        --output text
+      register: sg_check
+      changed_when: false
+
+    - name: Display launch summary and validation results
+      debug:
+        msg: |
+
+          ╔══════════════════════════════════════════════════════════╗
+          ║   ✓ EC2 Instance Launched - {{ host_name }}
+          ╚══════════════════════════════════════════════════════════╝
+
+            Instance:  {{ instance_id }}  ({{ instance_type }})
+            Public IP: {{ instance_ip }}
+            AZ:        {{ ec2.instances[0].placement.availability_zone }}
+
+            Validation:
+              SSH:            {{ '✓ connected' if ssh_check.rc == 0 else '✗ FAILED - check port 22' }}
+              EBS volume:     {{ '✓ ' + ebs_nvme_device + ' present' if ebs_check.rc == 0 else '✗ ' + ebs_nvme_device + ' NOT found' }}
+              IAM profile:    {{ '✓ attached' if 'instance-profile' in iam_check.stdout else '✗ NOT attached' }}
+              Security group: {{ '✓ ports ' + sg_check.stdout | trim | replace('\t', ' ') if sg_check.rc == 0 else '✗ could not read' }}
+
+            Inventory: inventories/hosts.yml -> {{ instance_ip }}
+            Details:   instances/{{ instance_id }}.txt
+
+            SSH:  ssh -i {{ ssh_key_file }} ubuntu@{{ instance_ip }}

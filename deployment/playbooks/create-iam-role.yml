@@ -1,0 +1,203 @@
+---
+# create-iam-role.yml — IAM role for a shared EC2 server
+#
+# Creates one IAM role that covers all applications running on this server.
+# Named after iam_role_name (defined in vault.yml), not any specific app.
+#
+# Policies attached:
+#   S3              — all buckets (each app manages its own bucket)
+#   Secrets Manager — all secrets (each app namespaces with {app_name}/*)
+#   CloudWatch      — metrics and log streams for any app
+#   SNS             — publish to any topic (app alert notifications)
+#   SSM             — Session Manager (AWSManagedInstanceCore)
+#   Serial Console  — emergency recovery access
+#
+# Usage: ansible-playbook playbooks/create-iam-role.yml \
+#          --vault-password-file ~/.vault_pass
+
+- name: Create IAM Role for Shared EC2 Server
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+    - name: Create IAM role
+      amazon.aws.iam_role:
+        name: "{{ iam_role_name }}"
+        assume_role_policy_document:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: ec2.amazonaws.com
+              Action: sts:AssumeRole
+        # SSM Session Manager — allows console access without SSH key
+        managed_policies:
+          - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        create_instance_profile: false
+        delete_instance_profile: false
+        purge_policies: false
+        description: "IAM role for {{ host_name }} shared EC2 server - managed by Ansible"
+        tags:
+          Server: "{{ host_name }}"
+          Environment: production
+          ManagedBy: Ansible
+
+    # -------------------------------------------------------------------------
+    # S3 — All buckets
+    # Each app on this server uses its own S3 bucket (e.g. my-awshosting-data).
+    # The server role covers all of them with a wildcard resource.
+    # Tighten by listing specific bucket ARNs once all apps are known.
+    # -------------------------------------------------------------------------
+    - name: Attach S3 access policy
+      amazon.aws.iam_policy:
+        iam_type: role
+        iam_name: "{{ iam_role_name }}"
+        policy_name: "{{ iam_policy_s3 }}"
+        state: present
+        policy_json:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: S3BucketAccess
+              Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+                - s3:GetObjectVersion
+                - s3:DeleteObjectVersion
+              Resource: "arn:aws:s3:::*/*"
+            - Sid: S3BucketList
+              Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetBucketLocation
+                - s3:ListBucketVersions
+              Resource: "arn:aws:s3:::*"
+
+    # -------------------------------------------------------------------------
+    # Secrets Manager — all secrets
+    # Apps name their secrets {app_name}/production (e.g. awshosting/production).
+    # The wildcard lets any app on this server create and read its own secrets
+    # without needing per-app IAM changes.
+    # -------------------------------------------------------------------------
+    - name: Attach Secrets Manager access policy
+      amazon.aws.iam_policy:
+        iam_type: role
+        iam_name: "{{ iam_role_name }}"
+        policy_name: "{{ iam_policy_secrets }}"
+        state: present
+        policy_json:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: SecretsManagerAccess
+              Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+                - secretsmanager:DescribeSecret
+                - secretsmanager:CreateSecret
+                - secretsmanager:PutSecretValue
+                - secretsmanager:DeleteSecret
+                - secretsmanager:TagResource
+                - secretsmanager:ListSecrets
+              Resource: "arn:aws:secretsmanager:{{ aws_region }}:*:secret:*"
+
+    # -------------------------------------------------------------------------
+    # CloudWatch — metrics and logs for all apps on this server
+    # -------------------------------------------------------------------------
+    - name: Attach CloudWatch access policy
+      amazon.aws.iam_policy:
+        iam_type: role
+        iam_name: "{{ iam_role_name }}"
+        policy_name: "{{ iam_policy_cloudwatch }}"
+        state: present
+        policy_json:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: CloudWatchMetrics
+              Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+                - cloudwatch:GetMetricData
+                - cloudwatch:GetMetricStatistics
+              Resource: "*"
+            - Sid: CloudWatchLogs
+              Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+                - logs:DescribeLogStreams
+                - logs:DescribeLogGroups
+              Resource: "*"
+
+    # -------------------------------------------------------------------------
+    # SNS — allow apps to publish alert notifications to any topic
+    # -------------------------------------------------------------------------
+    - name: Attach SNS publish policy
+      amazon.aws.iam_policy:
+        iam_type: role
+        iam_name: "{{ iam_role_name }}"
+        policy_name: "{{ iam_policy_sns }}"
+        state: present
+        policy_json:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: SNSPublish
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: "arn:aws:sns:{{ aws_region }}:*:*"
+
+    # -------------------------------------------------------------------------
+    # EC2 Serial Console — emergency recovery without SSH key
+    # -------------------------------------------------------------------------
+    - name: Enable EC2 serial console access for this AWS account
+      ansible.builtin.command:
+        cmd: >
+          aws ec2 enable-serial-console-access
+          --region {{ aws_region }}
+      register: serial_console_result
+      changed_when: true
+      ignore_errors: true
+
+    - name: Attach EC2 serial console access policy
+      amazon.aws.iam_policy:
+        iam_type: role
+        iam_name: "{{ iam_role_name }}"
+        policy_name: "{{ iam_policy_serial_console }}"
+        state: present
+        policy_json:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: SerialConsoleAccess
+              Effect: Allow
+              Action:
+                - ec2-instance-connect:SendSerialConsoleSSHPublicKey
+              Resource: "arn:aws:ec2:{{ aws_region }}:*:instance/*"
+
+    # -------------------------------------------------------------------------
+    # Instance Profile — attaches the role to the EC2 instance
+    # -------------------------------------------------------------------------
+    - name: Create IAM instance profile
+      amazon.aws.iam_instance_profile:
+        name: "{{ iam_instance_profile_name }}"
+        role: "{{ iam_role_name }}"
+        state: present
+
+    - name: Display IAM role summary
+      debug:
+        msg: |
+
+          ✓ IAM Role:         {{ iam_role_name }}
+            Instance Profile: {{ iam_instance_profile_name }}
+
+            Policies:
+              {{ iam_policy_s3 }}            - S3 (read/write/delete)
+              {{ iam_policy_secrets }}        - Secrets Manager
+              {{ iam_policy_cloudwatch }}     - CloudWatch metrics + logs
+              {{ iam_policy_sns }}            - SNS publish
+              {{ iam_policy_serial_console }} - Serial Console
+              SSM                             - AmazonSSMManagedInstanceCore

@@ -1,0 +1,87 @@
+---
+# delete-iam-deployer-user.yml — Remove the IAM deployer user
+#
+# Deletes the {{ host_name }}-deployer IAM user, detaches all policies,
+# and removes any access keys.
+#
+# ⚠ Run this only when decommissioning the server entirely.
+#    Once deleted you will need root credentials to create a replacement.
+#
+# Usage:
+#   ansible-playbook playbooks/delete-iam-deployer-user.yml \
+#     --vault-password-file ~/.vault_pass
+
+- name: Delete IAM Deployer User
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/vault.yml
+
+  vars:
+    deployer_user_name: "{{ host_name }}-deployer"
+    deployer_managed_policies:
+      - "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
+      - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+      - "arn:aws:iam::aws:policy/IAMFullAccess"
+      - "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
+      - "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Detach managed policies (required before user can be deleted)
+    # -------------------------------------------------------------------------
+    - name: Detach each managed policy
+      ansible.builtin.command:
+        cmd: >
+          aws iam detach-user-policy
+          --user-name {{ deployer_user_name }}
+          --policy-arn {{ item }}
+          --region {{ aws_region }}
+      loop: "{{ deployer_managed_policies }}"
+      changed_when: true
+      ignore_errors: true   # policy may already be detached
+
+    # -------------------------------------------------------------------------
+    # Access keys — must be deleted before the user can be removed
+    # -------------------------------------------------------------------------
+    - name: List access keys for deployer user
+      ansible.builtin.command:
+        cmd: >
+          aws iam list-access-keys
+          --user-name {{ deployer_user_name }}
+          --query 'AccessKeyMetadata[*].AccessKeyId'
+          --output text
+          --region {{ aws_region }}
+      register: access_key_ids
+      changed_when: false
+      ignore_errors: true
+
+    - name: Delete each access key
+      ansible.builtin.command:
+        cmd: >
+          aws iam delete-access-key
+          --user-name {{ deployer_user_name }}
+          --access-key-id {{ item }}
+          --region {{ aws_region }}
+      loop: "{{ access_key_ids.stdout.split() }}"
+      when: access_key_ids.stdout | length > 0
+      changed_when: true
+      ignore_errors: true
+
+    # -------------------------------------------------------------------------
+    # Delete the user
+    # -------------------------------------------------------------------------
+    - name: Delete deployer IAM user
+      amazon.aws.iam_user:
+        name: "{{ deployer_user_name }}"
+        state: absent
+
+    - name: Display result
+      debug:
+        msg:
+          - "✓ IAM deployer user deleted: {{ deployer_user_name }}"
+          - ""
+          - "  ⚠  You are now using whichever AWS credentials are active."
+          - "     Make sure you have root or another admin user configured"
+          - "     before running any further Ansible playbooks."
+

@@ -1,0 +1,36 @@
+# ============================================================================
+# Server Inventory (EXAMPLE / TEMPLATE)
+# ============================================================================
+#
+# Copy this file to hosts.yml:
+#   cp hosts.yml.example hosts.yml
+#
+# hosts.yml is gitignored — it contains your real server IP after deployment.
+# This .example file is the git-tracked template.
+#
+# The live hosts.yml is AUTO-UPDATED by launch-ec2-instance.yml after
+# provisioning. You should not need to edit it manually.
+#
+# Playbook targeting:
+#   hosts: localhost    → AWS API calls (create/delete resources)
+#   hosts: all          → Remote server (setup, update, deploy)
+#   hosts: app_servers  → Remote server (permissions, hardening)
+#   hosts: production   → Remote server (monitoring, SSL)
+
+all:
+  children:
+    app_servers:
+      children:
+        production:
+          hosts:
+            server:
+              # ── Connection Settings ───────────────────────────────────
+              # Before deploy: localhost / local (for infrastructure playbooks)
+              # After deploy:  auto-updated to your EC2 IP / ssh
+              ansible_host: localhost
+              ansible_connection: local
+
+  vars:
+    ansible_user: ubuntu
+    ansible_python_interpreter: /usr/bin/python3
+

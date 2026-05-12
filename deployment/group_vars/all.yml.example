@@ -1,0 +1,50 @@
+---
+# ============================================================================
+# ALL CONFIGURATION IS IN vault.yml (ENCRYPTED)
+# ============================================================================
+# This file contains only derived/computed variable names that are built from
+# host_name (defined in vault.yml).  None of these values are secret — they
+# are simply naming conventions for AWS resources.
+#
+# All sensitive values (credentials, region, instance config, etc.) live in
+# vault.yml so the encrypted file can be committed to git.
+#
+# Setup:
+#   1. Copy vault.yml.example to vault.yml
+#   2. Fill in your values
+#   3. Encrypt: ansible-vault encrypt group_vars/vault.yml --vault-password-file ~/.vault_pass
+#
+# Edit configuration:
+#   ansible-vault edit group_vars/vault.yml --vault-password-file ~/.vault_pass
+#
+# View configuration:
+#   ansible-vault view group_vars/vault.yml --vault-password-file ~/.vault_pass
+# ============================================================================
+
+# ============================================================================
+# DERIVED AWS RESOURCE NAMES
+# Computed from host_name in vault.yml.  Override in vault.yml if you need
+# custom names for any resource.
+# ============================================================================
+
+# EC2 / networking
+security_group_name:       "{{ host_name }}-sg"
+
+# IAM role and instance profile
+iam_role_name:             "{{ host_name }}-ec2-role"
+iam_instance_profile_name: "{{ host_name }}-instance-profile"
+
+# IAM inline policy names (one per permission boundary)
+iam_policy_s3:             "{{ host_name }}-s3-access"
+iam_policy_secrets:        "{{ host_name }}-secrets-access"
+iam_policy_cloudwatch:     "{{ host_name }}-cloudwatch-access"
+iam_policy_sns:            "{{ host_name }}-sns-access"
+iam_policy_serial_console: "{{ host_name }}-serial-console-access"
+
+# SSH key pair
+ssh_key_name: "{{ host_name }}-key"
+ssh_key_file: "~/.ssh/{{ host_name }}-key.pem"
+
+# EBS volume tag names (visible in the AWS Console)
+ebs_boot_volume_name: "{{ host_name }}-boot"
+ebs_data_volume_name: "{{ host_name }}-data"

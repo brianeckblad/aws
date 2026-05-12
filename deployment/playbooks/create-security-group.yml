@@ -1,0 +1,104 @@
+---
+# create-security-group.yml — Security group for a shared EC2 server
+#
+# Creates one security group for the entire server (not per-app).
+# All apps on this server share this security group.
+#
+# Inbound:
+#   22  — SSH (admin access; restrict to known IPs in production)
+#   80  — HTTP  (nginx → apps, redirect to HTTPS)
+#   443 — HTTPS (nginx → apps, TLS termination)
+#
+# Outbound: all traffic (package updates, AWS API, external services)
+#
+# Usage: ansible-playbook playbooks/create-security-group.yml \
+#          --vault-password-file ~/.vault_pass
+
+- name: Create Security Group for Shared Server
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Look up the default VPC — avoids hardcoding a VPC ID in the vault while
+    # still giving the module the explicit vpc_id it requires.
+    # Override by setting vpc_id in vault.yml if you use a custom VPC.
+    # -------------------------------------------------------------------------
+    - name: Look up default VPC
+      amazon.aws.ec2_vpc_net_info:
+        region: "{{ aws_region }}"
+        filters:
+          isDefault: "true"
+      register: default_vpc
+
+    - name: Fail if no default VPC found
+      ansible.builtin.fail:
+        msg: >
+          No default VPC found in {{ aws_region }}.
+          Set vpc_id in vault.yml and add it to the ec2_security_group task,
+          or recreate the default VPC with:
+          aws ec2 create-default-vpc --region {{ aws_region }}
+      when: default_vpc.vpcs | length == 0
+
+    - name: Create security group
+      amazon.aws.ec2_security_group:
+        vpc_id: "{{ vpc_id | default(default_vpc.vpcs[0].vpc_id) }}"
+        name: "{{ security_group_name }}"
+        description: "{{ host_name }} shared server - managed by Ansible"
+        region: "{{ aws_region }}"
+
+        rules:
+          # SSH — server administration.
+          # SECURITY: Restrict to known IPs in production.
+          # Replace 0.0.0.0/0 with your office/home CIDR or VPN range.
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: 0.0.0.0/0
+            rule_desc: "SSH - server administration (restrict to known IPs)"
+
+          # HTTP — nginx receives and redirects to HTTPS
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: 0.0.0.0/0
+            rule_desc: "HTTP - nginx (redirect to HTTPS)"
+
+          # HTTPS — nginx handles TLS, proxies to app processes
+          - proto: tcp
+            from_port: 443
+            to_port: 443
+            cidr_ip: 0.0.0.0/0
+            rule_desc: "HTTPS - nginx (TLS termination, proxy to apps)"
+
+        tags:
+          Name: "{{ security_group_name }}"
+          Server: "{{ host_name }}"
+          Environment: production
+          ManagedBy: Ansible
+          CreatedDate: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+    - name: Display security group summary
+      debug:
+        msg: |
+
+          ✓ Security Group: {{ security_group_name }}
+            Region: {{ aws_region }}
+
+            Inbound:
+              22  (TCP) - SSH   from 0.0.0.0/0
+              80  (TCP) - HTTP  from 0.0.0.0/0
+              443 (TCP) - HTTPS from 0.0.0.0/0
+
+            Outbound: all traffic allowed
+
+            ⚠  PRODUCTION RECOMMENDATION:
+            Restrict SSH (port 22) to known IPs:
+              - Your office CIDR
+              - Your home IP
+              - VPN egress range
+            Edit the security group in AWS Console or update this playbook.
+

@@ -1,0 +1,111 @@
+---
+# terminate-ec2-instance.yml — Terminate the shared EC2 server
+# Counterpart to: launch-ec2-instance.yml
+#
+# Finds the instance by the host_name tag and terminates it.
+# The EBS data volume survives (ebs_data_delete_on_termination: false).
+#
+# Usage: ansible-playbook playbooks/terminate-ec2-instance.yml \
+#          --vault-password-file ~/.vault_pass
+
+- name: Terminate EC2 Instance
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+    - name: Find EC2 instance by host_name tag
+      amazon.aws.ec2_instance_info:
+        filters:
+          "tag:Name": "{{ host_name }}"
+          "instance-state-name":
+            - running
+            - stopped
+            - stopping
+        region: "{{ aws_region }}"
+      register: ec2_instances
+
+    - name: No instance found
+      debug:
+        msg: "No EC2 instance found with tag Name={{ host_name }} — nothing to terminate"
+      when: ec2_instances.instances | length == 0
+
+    - name: Warn about multiple instances with same host_name
+      debug:
+        msg:
+          - "⚠  Found {{ ec2_instances.instances | length }} instances named '{{ host_name }}'"
+          - "ALL {{ ec2_instances.instances | length }} instances will be terminated."
+      when: ec2_instances.instances | length > 1
+
+    - name: Show instance(s) to be terminated
+      debug:
+        msg:
+          - "Instance: {{ item.instance_id }}"
+          - "  State: {{ item.state.name }}"
+          - "  IP:    {{ item.public_ip_address | default('N/A') }}"
+          - "  Type:  {{ item.instance_type }}"
+      loop: "{{ ec2_instances.instances }}"
+      when: ec2_instances.instances | length > 0
+
+    - name: Disable termination protection
+      command: >
+        aws ec2 modify-instance-attribute
+        --instance-id {{ item.instance_id }}
+        --no-disable-api-termination
+        --region {{ aws_region }}
+      loop: "{{ ec2_instances.instances }}"
+      when: ec2_instances.instances | length > 0
+      failed_when: false
+
+    - name: Terminate EC2 instance
+      amazon.aws.ec2_instance:
+        instance_ids: "{{ item.instance_id }}"
+        state: absent
+        wait: yes
+        region: "{{ aws_region }}"
+      loop: "{{ ec2_instances.instances }}"
+      when: ec2_instances.instances | length > 0
+
+    - name: Remove instance info files
+      file:
+        path: "{{ playbook_dir }}/../instances/{{ item.instance_id }}.txt"
+        state: absent
+      loop: "{{ ec2_instances.instances }}"
+      when: ec2_instances.instances | length > 0
+
+    - name: Reset inventory to localhost placeholder
+      copy:
+        content: |
+          # Server Inventory — RESET by terminate-ec2-instance.yml
+          # No active server. Run launch-ec2-instance.yml to provision.
+
+          all:
+            children:
+              app_servers:
+                children:
+                  production:
+                    hosts:
+                      server:
+                        ansible_host: localhost
+                        ansible_connection: local
+
+            vars:
+              ansible_user: ubuntu
+              ansible_python_interpreter: /usr/bin/python3
+        dest: "{{ playbook_dir }}/../inventories/hosts.yml"
+      failed_when: false
+
+    - name: Display result
+      debug:
+        msg: |
+
+          ✓ EC2 instance terminated: {{ host_name }}
+          ✓ Inventory reset to localhost placeholder
+
+            Note: EBS data volume survives - reattach to new instance if needed.
+
+            To provision a new server:
+              ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass
+      when: ec2_instances.instances | length > 0

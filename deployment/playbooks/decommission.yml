@@ -1,0 +1,158 @@
+---
+# decommission.yml — Permanently destroy the shared EC2 server and all its AWS resources
+#
+# ⚠  WARNING: DESTRUCTIVE AND IRREVERSIBLE
+#
+# Deletes (in reverse order of creation):
+#   1. EC2 instance
+#   2. SSH key pair (AWS + local ~/.ssh file)
+#   3. Security group
+#   4. IAM role, instance profile, and all inline policies
+#
+# What is NOT deleted (app-level — each app manages its own):
+#   - S3 buckets
+#   - Secrets Manager entries
+#   - CloudFront distributions
+#   - WAF web ACLs
+#   - CloudWatch log groups / alarms
+#
+# The EBS data volume survives instance termination (ebs_data_delete_on_termination: false).
+# It must be manually deleted in the AWS Console if no longer needed.
+#
+# Recommended usage (uses decommission.sh wrapper for confirmation):
+#   cd deployment
+#   ./scripts/decommission.sh
+#
+# Direct usage (bypass wrapper):
+#   ansible-playbook playbooks/decommission.yml \
+#     --vault-password-file ~/.vault_pass \
+#     -e decommission_confirmed=true
+#
+# To delete a single resource instead:
+#   ansible-playbook playbooks/terminate-ec2-instance.yml --vault-password-file ~/.vault_pass
+#   ansible-playbook playbooks/delete-ssh-key.yml         --vault-password-file ~/.vault_pass
+#   ansible-playbook playbooks/delete-security-group.yml  --vault-password-file ~/.vault_pass
+#   ansible-playbook playbooks/delete-iam-role.yml        --vault-password-file ~/.vault_pass
+
+# ==============================================================================
+# Safety gate
+# ==============================================================================
+
+- name: Confirm Decommission
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+    - name: Require explicit confirmation flag
+      fail:
+        msg: |
+          Run through the decommission wrapper script for safety:
+            cd deployment && ./scripts/decommission.sh
+
+          To bypass and run directly, pass: -e decommission_confirmed=true
+      when: decommission_confirmed | default(false) | bool != true
+
+    - name: Display decommission plan
+      debug:
+        msg: |
+
+          ╔══════════════════════════════════════════════════════════╗
+          ║   ⚠  DECOMMISSIONING SERVER - {{ host_name }}
+          ╚══════════════════════════════════════════════════════════╝
+
+            Region: {{ aws_region }}
+
+            Will delete:
+              1. EC2 instance             (Name={{ host_name }})
+              2. SSH key pair             ({{ ssh_key_name }})
+              3. Security group           ({{ security_group_name }})
+              4. IAM role + profile       ({{ iam_role_name }})
+
+            Will NOT delete (app-level - manage from each app's repo):
+              - S3 buckets
+              - Secrets Manager entries
+              - CloudFront distributions
+              - WAF web ACLs
+
+            EBS data volume survives - delete manually in AWS Console if needed.
+
+            Starting teardown...
+
+# ==============================================================================
+# Step 1: Terminate EC2 instance
+# ==============================================================================
+
+- name: Step 1 — Terminate EC2 Instance
+  import_playbook: terminate-ec2-instance.yml
+
+# ==============================================================================
+# Step 2: Delete SSH key pair
+# ==============================================================================
+
+- name: Step 2 — Delete SSH Key Pair
+  import_playbook: delete-ssh-key.yml
+
+# ==============================================================================
+# Step 3: Delete security group
+# ==============================================================================
+
+- name: Step 3 — Delete Security Group
+  import_playbook: delete-security-group.yml
+
+# ==============================================================================
+# Step 4: Delete IAM role, policies, and instance profile
+# ==============================================================================
+
+- name: Step 4 — Delete IAM Role
+  import_playbook: delete-iam-role.yml
+
+# ==============================================================================
+# Final cleanup
+# ==============================================================================
+
+- name: Decommission Complete
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+    - name: Remove local instance info files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ playbook_dir }}/../instance-info.txt"
+      failed_when: false
+
+    - name: Remove all instance info files from instances/
+      shell: "rm -f {{ playbook_dir }}/../instances/*.txt"
+      changed_when: false
+      failed_when: false
+
+    - name: Display decommission summary
+      debug:
+        msg: |
+
+          ╔══════════════════════════════════════════════════════════╗
+          ║   Decommission Complete - {{ host_name }}
+          ╚══════════════════════════════════════════════════════════╝
+
+            Deleted:
+              ✓ EC2 instance:      {{ host_name }}
+              ✓ SSH key pair:      {{ ssh_key_name }}
+              ✓ Security group:    {{ security_group_name }}
+              ✓ IAM role:          {{ iam_role_name }}
+              ✓ Instance profile:  {{ iam_instance_profile_name }}
+
+            Reminder - delete these manually if no longer needed:
+              - EBS data volume  (AWS Console -> EC2 -> Volumes)
+              - App S3 buckets   (managed by each app)
+              - App secrets      (managed by each app)
+
+            To provision a new server:
+              ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass

@@ -1,0 +1,131 @@
+---
+# provision-server.yml — Complete shared EC2 server provisioning
+#
+# Run ONCE to create and harden a server that can host multiple applications.
+# Each app is deployed independently afterwards with its own setup.yml.
+#
+# Usage:
+#   ansible-playbook playbooks/provision-server.yml \
+#     --vault-password-file ~/.vault_pass
+#
+# What this creates:
+#   1. Security group   — host_name-sg  (ports 22, 80, 443)
+#   2. IAM role         — host_name-ec2-role  (S3, Secrets Manager, CloudWatch, SSM)
+#   3. SSH key pair     — host_name-key  (saved to ~/.ssh/)
+#   4. EC2 instance     — tagged Name=host_name, EBS at apps_root
+#   5. Server hardening — OS hardening, nginx, supervisor, fail2ban, UFW
+#
+# What this does NOT do (app-level concerns):
+#   - Deploy any application code
+#   - Create nginx vhosts
+#   - Install SSL certificates
+#   - Create app virtualenvs or supervisor programs
+#   - Create S3 buckets or Secrets Manager entries
+#
+# To add an app to this server after provisioning, run from the app's repo:
+#   ansible-playbook playbooks/setup.yml --vault-password-file ~/.vault_pass
+#
+# MULTI-APP:
+#   Each app on this server has its own vault with a unique app_name,
+#   server_name (FQDN), and gunicorn_port. The AWS resources (SG, IAM,
+#   SSH key, EC2) are shared — created once here.
+
+- name: Display server provisioning plan
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+  tasks:
+    - name: Show what will be provisioned
+      debug:
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   Shared Server Provisioning Plan                       ║"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  Server:   {{ host_name }}"
+          - "  Region:   {{ aws_region }}"
+          - "  Type:     {{ ec2_instance_type }}"
+          - "  EBS:      {{ ebs_volume_size }} GB {{ ebs_volume_type }} → {{ apps_root }}"
+          - ""
+          - "  Steps:"
+          - "    1. Security group  — {{ security_group_name }}"
+          - "    2. IAM role        — {{ iam_role_name }}"
+          - "    3. SSH key pair    — {{ ssh_key_name }} → {{ ssh_key_file }}"
+          - "    4. EC2 instance    — Name: {{ host_name }}"
+          - "    5. Server harden   — OS, nginx, supervisor, fail2ban, UFW"
+          - ""
+          - "  This server can host multiple apps once provisioned."
+
+# ==============================================================================
+# Step 1: Security Group
+# ==============================================================================
+- name: Step 1 — Create Security Group
+  import_playbook: create-security-group.yml
+
+# ==============================================================================
+# Step 2: IAM Role
+# ==============================================================================
+- name: Step 2 — Create IAM Role
+  import_playbook: create-iam-role.yml
+
+# ==============================================================================
+# Step 3: SSH Key Pair
+# ==============================================================================
+- name: Step 3 — Create SSH Key Pair
+  import_playbook: create-ssh-key.yml
+
+# ==============================================================================
+# Step 4: Launch EC2 Instance
+# ==============================================================================
+- name: Step 4 — Launch EC2 Instance
+  import_playbook: launch-ec2-instance.yml
+
+# ==============================================================================
+# Step 5: Harden Server (OS + shared services)
+# ==============================================================================
+- name: Step 5 — Harden Server
+  import_playbook: harden-server.yml
+
+# ==============================================================================
+# Summary
+# ==============================================================================
+- name: Server Provisioning Complete
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+  tasks:
+    - name: Display completion summary
+      debug:
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   Shared Server Ready                                   ║"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  AWS resources:"
+          - "    Security group:  {{ security_group_name }}"
+          - "    IAM role:        {{ iam_role_name }}"
+          - "    SSH key:         {{ ssh_key_file }}"
+          - "    EC2 instance:    Name={{ host_name }}"
+          - ""
+          - "  Server foundation:"
+          - "    EBS:             {{ ebs_volume_size }} GB mounted at {{ apps_root }}"
+          - "    Logs:            {{ logs_root }}"
+          - "    nginx:           running (no vhosts yet)"
+          - "    supervisor:      running (no programs yet)"
+          - "    fail2ban:        active"
+          - "    UFW:             deny ingress; 22/80/443 open"
+          - ""
+          - "  Deploy an app to this server:"
+          - "    1. Point your app domain DNS to this server's IP"
+          - "    2. Set app_name, server_name, gunicorn_port in your app vault"
+          - "    3. ansible-playbook playbooks/setup.yml --vault-password-file ~/.vault_pass"
+          - ""
+          - "  SSH access:"
+          - "    ssh -i {{ ssh_key_file }} ubuntu@<SERVER_IP>"
+          - ""
+          - "  Instance info saved to: deployment/instances/"
+
