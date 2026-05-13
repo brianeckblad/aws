@@ -1,61 +1,53 @@
 # Quick Start
 
-Provision the server in one command (~10–15 minutes).
+Choose the path that matches your situation:
 
-> **Prerequisite:** Complete [Prerequisites](PREREQUISITES.md) first.
+- **[Deploy a new server](#deploy-a-new-server)** — first-time setup, nothing exists yet in AWS
+- **[Work with an existing server](#work-with-an-existing-server)** — connect, update, or decommission a server that's already running
+
+> **Prerequisite for both paths:** Complete [Prerequisites](PREREQUISITES.md) first.
 
 ---
 
-## 1. Load your variables
+## Deploy a New Server
+
+### 1. Load your variables
 
 ```bash
 cd deployment
 source scripts/load-vars.sh
 ```
 
-Choose **option 1** if the server already exists (loads AWS instance IP into the shell), or **option 2** for a fresh deployment.
+This reads `group_vars/vault.yml` and exports `host_name`, `aws_region`, and `admin_user` into your shell. If no server exists yet, no IP prompt appears.
 
-Variables available after sourcing (values come from your `group_vars/vault.yml`):
-
-```
-host_name={{ host_name }}
-aws_region={{ aws_region }}
-admin_user={{ admin_user }}
-```
-
----
-
-## 2. Provision the server
+### 2. Provision
 
 ```bash
 ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass
 ```
 
-This is the only command needed. It runs all five steps in order:
+This runs all five steps in order:
 
 | Step | Playbook | What it creates |
 |------|----------|----------------|
-| 1 | `create-security-group.yml` | Security group `{host_name}-sg` — ports 22, 80, 443 |
+| 1 | `create-security-group.yml` | Security group `{host_name}-sg` — ports 22 (deployer IP only), 80, 443 |
 | 2 | `create-iam-role.yml` | IAM role `{host_name}-ec2-role` + instance profile |
 | 3 | `create-ssh-key.yml` | Key pair `{host_name}-key` → `~/.ssh/{host_name}-key.pem` |
 | 4 | `launch-ec2-instance.yml` | EC2 instance + EBS data volume at `apps_root` |
-| 5 | `harden-server.yml` | OS hardening, nginx, supervisor, fail2ban, UFW |
+| 5 | `harden-server.yml` | OS hardening, fail2ban, UFW, unattended-upgrades |
 
-**Duration:** 10–15 minutes (most of which is waiting for EC2 to become reachable)
+**Duration:** 10–15 minutes (most of which is waiting for EC2 to become reachable).
 
-**Idempotent:** Safe to re-run. Ansible skips steps that already exist.
+**Idempotent:** Safe to re-run — Ansible skips steps that already exist.
 
 > **Prefer doing it step by step, or want to understand each AWS CLI command?**
-> See [Manual Deployment](MANUAL_DEPLOYMENT.md) — covers every step with AWS Console and CLI alternatives.
+> See [Manual Deployment](MANUAL_DEPLOYMENT.md).
 
----
+### 3. Find your server
 
-## 3. Find your server
-
-Instance details are saved to `deployment/instances/`:
+Instance details are saved to `deployment/instances/` automatically:
 
 ```bash
-ls deployment/instances/
 cat deployment/instances/*.txt
 # Shows: server IP, instance ID, SSH command
 ```
@@ -69,37 +61,32 @@ aws ec2 describe-instances \
   --output table
 ```
 
----
-
-## 4. Connect via SSH
+### 4. Connect via SSH
 
 ```bash
-ssh -i {{ ssh_key_file }} ubuntu@<SERVER_IP>
+ssh -i ~/.ssh/${host_name}-key.pem ubuntu@<SERVER_IP>
 ```
 
-Verify services are running:
+The exact SSH command is in `deployment/instances/*.txt`.
+
+### 5. Verify the server
 
 ```bash
-sudo systemctl status nginx
-sudo systemctl status supervisor
+sudo systemctl is-active fail2ban unattended-upgrades
 sudo ufw status
-sudo fail2ban-client status
 ```
 
----
+Expected: both services show `active`; UFW shows ports 22, 80, and 443 open with default deny.
 
-## 5. What is running on the server
-
-After `harden-server.yml` completes the server has:
+The server foundation is now in place:
 
 ```
 /opt/apps/           ← EBS data volume (100 GB, survives termination)
 /var/log/apps/       ← shared log root
 
-nginx                ← running, default-deny vhost active (returns 444 on IP-direct access)
-supervisor           ← running, no programs yet (apps add their own)
-fail2ban             ← running, SSH protection active
+fail2ban             ← running, SSH brute-force protection active
 ufw                  ← active, default deny; 22/80/443 open
+unattended-upgrades  ← running, automatic security patches enabled
 ```
 
 The server is **ready for application deployment** from each app's own repo.
@@ -110,9 +97,7 @@ Each app will:
 - Deploy code to `/opt/apps/{app_name}/`
 - Write logs to `/var/log/apps/{app_name}/`
 
----
-
-## Run individual steps
+### Run individual steps
 
 If you need to re-run a single step:
 
@@ -126,15 +111,42 @@ ansible-playbook playbooks/harden-server.yml          --vault-password-file ~/.v
 
 ---
 
-## Update the server
+## Work with an Existing Server
 
-To apply OS package upgrades or re-apply configuration changes to a running server:
+### 1. Load your variables
+
+```bash
+cd deployment
+source scripts/load-vars.sh
+```
+
+If `inventories/hosts.yml` contains a server IP, the script will prompt you to load it into `$server_ip`. Accept to use it in subsequent commands.
+
+### 2. Connect via SSH
+
+```bash
+ssh -i ~/.ssh/${host_name}-key.pem ${admin_user}@${server_ip}
+```
+
+### 3. Update the server
+
+Apply OS package upgrades and re-apply hardening config without touching app deployments:
 
 ```bash
 ansible-playbook playbooks/update-server.yml --vault-password-file ~/.vault_pass
 ```
 
-This upgrades packages, re-applies nginx/fail2ban/SSH/sysctl config, and warns if a reboot is needed. Safe to run at any time without affecting app deployments.
+This also updates the security group SSH rule to your current public IP before connecting, so it works even if your IP has changed.
+
+### 4. Decommission
+
+To tear down all AWS resources for this server:
+
+```bash
+ansible-playbook playbooks/decommission.yml --vault-password-file ~/.vault_pass
+```
+
+See [Decommission](DECOMMISSION.md) for full details and what is and isn't deleted.
 
 ---
 
@@ -143,17 +155,10 @@ This upgrades packages, re-applies nginx/fail2ban/SSH/sysctl config, and warns i
 | Problem | Fix |
 |---------|-----|
 | `Unable to locate credentials` | `aws configure` — re-enter deployer key and secret |
-| `No module named 'boto3'` | `pip3 install -r requirements.txt` (run from repo root) |
+| `No module named 'boto3'` | `pip install -r requirements.txt` (run from repo root) |
 | `UNREACHABLE` after EC2 launch | Wait 60–90 seconds for SSH to come up and re-run `harden-server.yml` |
-| `Permission denied (publickey)` | Check `{{ ssh_key_file }}` exists and has `chmod 600` |
+| `Permission denied (publickey)` | Check `~/.ssh/${host_name}-key.pem` exists and has `chmod 600` |
 | Vault password wrong | `ansible-vault view group_vars/vault.yml --vault-password-file ~/.vault_pass` |
 | SG already exists on re-run | Normal — Ansible is idempotent, it updates in place |
 | EBS "device not found" | Instance type may not be Nitro-based; update `ebs_nvme_device` in vault |
-
----
-
-## Next steps
-
-- Deploy your first application from its own repo (`setup.yml` targeting this server's IP)
-- [Decommission](DECOMMISSION.md) — when you need to tear everything down
-- [Security Hardening](SECURITY_HARDENING.md) — verify and audit what was applied
+| SSH blocked after IP change | Run `update-server.yml` from a location with current SG access, or update the SG manually in AWS Console |
