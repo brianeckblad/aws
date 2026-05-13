@@ -110,7 +110,11 @@ if [ -f "$_INVENTORY" ] && grep -q "ansible_host:" "$_INVENTORY" 2>/dev/null; th
         | sed 's/.*ansible_host:[[:space:]]*//' \
         | tr -d '[:space:]')
 
-    if [ -n "$_detected_ip" ]; then
+    # Skip localhost/127.0.0.1 — that is the reset placeholder written by
+    # terminate-ec2-instance.yml, not a real server IP.
+    if [ -n "$_detected_ip" ] && \
+       [ "$_detected_ip" != "localhost" ] && \
+       [ "$_detected_ip" != "127.0.0.1" ]; then
         echo "Found existing server in inventory:"
         echo "  IP: $_detected_ip"
         echo ""
