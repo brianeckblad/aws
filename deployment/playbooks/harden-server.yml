@@ -106,19 +106,45 @@
         msg: "Deployer IP: {{ deployer_ip }} - will be whitelisted in UFW and fail2ban"
 
     # =========================================================================
-    # PACKAGES
+    # UFW PRE-FLIGHT — whitelist deployer IP immediately.
+    #
+    # On a re-run the server may already have UFW active with default-deny
+    # from a previous partial run. If we don't whitelist first, the next
+    # task that requires a NEW SSH connection (e.g. async apt) will be
+    # blocked by UFW and time out, locking us out.
     # =========================================================================
 
-    # Run upgrade asynchronously — it can take 5–15 min on a fresh instance
-    # and would otherwise hold the SSH connection open until the 30s timeout
-    # kills it. async=3600 lets it run up to 1 hour; poll=30 checks every 30s.
+    - name: UFW pre-flight — install ufw if missing
+      apt:
+        name: ufw
+        state: present
+
+    - name: UFW pre-flight — whitelist deployer IP before any other changes
+      ufw:
+        rule: allow
+        from_ip: "{{ deployer_ip }}"
+        comment: "Deployer - unrestricted access (pre-flight)"
+
+    - name: UFW pre-flight — ensure SSH port 22 is open
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+
+    # =========================================================================
+    # PACKAGES
+    #
+    # Run synchronously — async tasks spawn a new SSH connection to poll
+    # which can be blocked by UFW's default-deny on a re-run.
+    # With ServerAliveInterval=30 in ansible.cfg the SSH connection survives
+    # the 5–15 min this takes without needing async.
+    # =========================================================================
+
     - name: Update apt cache and upgrade all packages to latest
       apt:
         upgrade: dist
         update_cache: yes
         cache_valid_time: 3600
-      async: 3600
-      poll: 30
       register: apt_upgrade
 
     - name: Check if reboot is required after upgrade
@@ -135,8 +161,6 @@
       apt:
         name: "{{ system_packages }}"
         state: present
-      async: 600
-      poll: 15
 
     # =========================================================================
     # EBS DATA VOLUME
