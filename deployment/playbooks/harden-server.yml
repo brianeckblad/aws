@@ -109,11 +109,16 @@
     # PACKAGES
     # =========================================================================
 
+    # Run upgrade asynchronously — it can take 5–15 min on a fresh instance
+    # and would otherwise hold the SSH connection open until the 30s timeout
+    # kills it. async=3600 lets it run up to 1 hour; poll=30 checks every 30s.
     - name: Update apt cache and upgrade all packages to latest
       apt:
         upgrade: dist
         update_cache: yes
         cache_valid_time: 3600
+      async: 3600
+      poll: 30
       register: apt_upgrade
 
     - name: Check if reboot is required after upgrade
@@ -130,6 +135,8 @@
       apt:
         name: "{{ system_packages }}"
         state: present
+      async: 600
+      poll: 15
 
     # =========================================================================
     # EBS DATA VOLUME
@@ -200,7 +207,6 @@
         regexp: '^#?PasswordAuthentication'
         line: 'PasswordAuthentication no'
         state: present
-      notify: restart sshd
 
     - name: SSH — Disable root login
       lineinfile:
@@ -208,7 +214,6 @@
         regexp: '^#?PermitRootLogin'
         line: 'PermitRootLogin no'
         state: present
-      notify: restart sshd
 
     - name: SSH — Limit auth retries to 3
       lineinfile:
@@ -216,7 +221,6 @@
         regexp: '^#?MaxAuthTries'
         line: 'MaxAuthTries 3'
         state: present
-      notify: restart sshd
 
     - name: SSH — Disable X11 forwarding
       lineinfile:
@@ -224,7 +228,6 @@
         regexp: '^#?X11Forwarding'
         line: 'X11Forwarding no'
         state: present
-      notify: restart sshd
 
     - name: SSH — Set client idle timeout (5 min)
       lineinfile:
@@ -232,7 +235,6 @@
         regexp: '^#?ClientAliveInterval'
         line: 'ClientAliveInterval 300'
         state: present
-      notify: restart sshd
 
     - name: SSH — Set max keepalive count (disconnect after 2nd missed probe)
       lineinfile:
@@ -240,7 +242,26 @@
         regexp: '^#?ClientAliveCountMax'
         line: 'ClientAliveCountMax 2'
         state: present
-      notify: restart sshd
+
+    - name: SSH — Validate sshd config before restarting
+      command: sshd -t
+      changed_when: false
+
+    # Restart sshd async so Ansible doesn't lose the connection mid-restart.
+    # After the restart fires we wait_for_connection to confirm SSH came back.
+    - name: SSH — Restart sshd (async to avoid dropping current connection)
+      service:
+        name: ssh
+        state: restarted
+      async: 60
+      poll: 0
+      register: sshd_restart
+
+    - name: SSH — Wait for sshd to come back after restart
+      wait_for_connection:
+        delay: 5
+        sleep: 5
+        timeout: 120
 
     # =========================================================================
     # AUTOMATIC SECURITY UPDATES
@@ -581,10 +602,6 @@
           {{ '  ⚠  REBOOT REQUIRED - run: sudo reboot' if reboot_required_file.stat.exists else '  No reboot required.' }}
 
   handlers:
-    - name: restart sshd
-      service:
-        name: ssh
-        state: restarted
 
     - name: restart fail2ban
       service:
