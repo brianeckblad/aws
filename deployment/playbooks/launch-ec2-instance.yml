@@ -344,16 +344,32 @@
       changed_when: false
 
     # -----------------------------------------------------------------
+    # Refresh inventory so harden-server.yml picks up the new IP
+    # (inventory is loaded at startup; this forces a re-read)
+    # -----------------------------------------------------------------
+    - name: Refresh inventory to pick up new hosts.yml
+      meta: refresh_inventory
+
+    # -----------------------------------------------------------------
     # Post-launch validation
     # -----------------------------------------------------------------
+    - name: Wait for SSH to be fully ready (extra buffer for cloud-init)
+      wait_for:
+        host: "{{ instance_ip }}"
+        port: 22
+        delay: 20
+        sleep: 10
+        timeout: 600
+        state: started
+
     - name: Validate SSH connectivity
       command: >
-        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20
         -i {{ ssh_key_file }}
         ubuntu@{{ instance_ip }} echo "SSH_OK"
       register: ssh_check
-      retries: 3
-      delay: 10
+      retries: 10
+      delay: 15
       until: ssh_check.rc == 0
       changed_when: false
 
