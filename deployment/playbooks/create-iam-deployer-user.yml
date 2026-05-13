@@ -3,14 +3,12 @@
 #
 # Run this ONCE with temporary root credentials before any other playbook.
 # Creates a scoped IAM user ({{ host_name }}-deployer) with the minimum
-# permissions required to provision and manage the EC2 server infrastructure.
+# permissions required to provision and manage this specific EC2 server.
 #
-# Policies attached:
-#   AmazonEC2FullAccess        — provision/terminate EC2, security groups, key pairs
-#   AmazonS3FullAccess         — S3 bucket operations
-#   IAMFullAccess              — create/delete IAM roles and instance profiles
-#   SecretsManagerReadWrite    — read/write Secrets Manager secrets
-#   CloudWatchLogsFullAccess   — create log groups and streams
+# Policies (all scoped to this server's resources):
+#   EC2        — instances/SGs/keys/volumes tagged or named {host_name}*
+#   IAM        — roles/profiles/users named {host_name}*
+#   STS        — GetCallerIdentity only (needed to resolve account ID)
 #
 # After running:
 #   1. Copy the access key output to `aws configure` (replace root credentials)
@@ -29,14 +27,21 @@
 
   vars:
     deployer_user_name: "{{ host_name }}-deployer"
-    deployer_managed_policies:
-      - "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
-      - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
-      - "arn:aws:iam::aws:policy/IAMFullAccess"
-      - "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
-      - "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
 
   tasks:
+
+    # -------------------------------------------------------------------------
+    # Resolve AWS account ID — used to scope all resource ARNs
+    # -------------------------------------------------------------------------
+    - name: Get AWS account ID
+      ansible.builtin.command: aws sts get-caller-identity --query Account --output text
+      register: aws_account_id_raw
+      changed_when: false
+
+    - name: Set account ID fact
+      set_fact:
+        aws_account_id: "{{ aws_account_id_raw.stdout | trim }}"
+
     # -------------------------------------------------------------------------
     # IAM User
     # -------------------------------------------------------------------------
@@ -50,22 +55,253 @@
           ManagedBy: Ansible
 
     # -------------------------------------------------------------------------
-    # Attach managed policies
+    # EC2 Policy — scoped to this server's named resources only
+    #
+    # Describe actions (DescribeInstances, DescribeImages, etc.) do not support
+    # resource-level restrictions in AWS — Resource: "*" is required for these.
+    # All mutating actions are scoped via ARN or RequestTag/ResourceTag conditions.
     # -------------------------------------------------------------------------
-    - name: Attach each managed policy
-      ansible.builtin.command:
-        cmd: >
-          aws iam attach-user-policy
-          --user-name {{ deployer_user_name }}
-          --policy-arn {{ item }}
-          --region {{ aws_region }}
-      loop: "{{ deployer_managed_policies }}"
-      changed_when: true
+    - name: Attach EC2 inline policy
+      amazon.aws.iam_policy:
+        iam_type: user
+        iam_name: "{{ deployer_user_name }}"
+        policy_name: "{{ host_name }}-deployer-ec2"
+        state: present
+        policy_json:
+          Version: "2012-10-17"
+          Statement:
+
+            - Sid: EC2DescribeReadOnly
+              Effect: Allow
+              Action:
+                - ec2:DescribeInstances
+                - ec2:DescribeInstanceStatus
+                - ec2:DescribeInstanceTypes
+                - ec2:DescribeImages
+                - ec2:DescribeSecurityGroups
+                - ec2:DescribeKeyPairs
+                - ec2:DescribeVolumes
+                - ec2:DescribeVpcs
+                - ec2:DescribeSubnets
+                - ec2:DescribeAvailabilityZones
+                - ec2:DescribeNetworkInterfaces
+                - ec2:DescribeTags
+                - ec2:GetSerialConsoleAccessStatus
+              Resource: "*"
+
+            - Sid: EC2SecurityGroup
+              Effect: Allow
+              Action:
+                - ec2:CreateSecurityGroup
+                - ec2:DeleteSecurityGroup
+                - ec2:AuthorizeSecurityGroupIngress
+                - ec2:AuthorizeSecurityGroupEgress
+                - ec2:RevokeSecurityGroupIngress
+                - ec2:RevokeSecurityGroupEgress
+                - ec2:UpdateSecurityGroupRuleDescriptionsIngress
+              Resource:
+                - "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:security-group/*"
+                - "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:vpc/*"
+              Condition:
+                StringLike:
+                  "aws:ResourceTag/Name": "{{ host_name }}-*"
+
+            - Sid: EC2CreateSGUntagged
+              # CreateSecurityGroup needs vpc resource which may not yet be tagged
+              Effect: Allow
+              Action:
+                - ec2:CreateSecurityGroup
+              Resource:
+                - "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:vpc/*"
+
+            - Sid: EC2KeyPair
+              Effect: Allow
+              Action:
+                - ec2:CreateKeyPair
+                - ec2:DeleteKeyPair
+                - ec2:ImportKeyPair
+              Resource: "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:key-pair/{{ host_name }}-*"
+
+            - Sid: EC2LaunchInstance
+              # RunInstances requires Resource:* but is locked to this server's tag
+              Effect: Allow
+              Action:
+                - ec2:RunInstances
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  "aws:RequestTag/Name": "{{ host_name }}"
+
+            - Sid: EC2LaunchSupportResources
+              # Supporting resources needed during RunInstances (AMI, SG, key, subnet, volume)
+              Effect: Allow
+              Action:
+                - ec2:RunInstances
+              Resource:
+                - "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:security-group/*"
+                - "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:key-pair/{{ host_name }}-*"
+                - "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:subnet/*"
+                - "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:volume/*"
+                - "arn:aws:ec2:{{ aws_region }}::image/*"
+                - "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:network-interface/*"
+
+            - Sid: EC2ManageThisInstance
+              # Stop/start/terminate/modify only instances tagged with this server name
+              Effect: Allow
+              Action:
+                - ec2:TerminateInstances
+                - ec2:StopInstances
+                - ec2:StartInstances
+                - ec2:RebootInstances
+                - ec2:ModifyInstanceAttribute
+              Resource: "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:instance/*"
+              Condition:
+                StringEquals:
+                  "ec2:ResourceTag/Name": "{{ host_name }}"
+
+            - Sid: EC2ManageVolumes
+              Effect: Allow
+              Action:
+                - ec2:CreateVolume
+                - ec2:DeleteVolume
+                - ec2:AttachVolume
+                - ec2:DetachVolume
+                - ec2:ModifyVolume
+              Resource: "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:volume/*"
+              Condition:
+                StringEquals:
+                  "aws:ResourceTag/Name": "{{ host_name }}-*"
+
+            - Sid: EC2CreateTags
+              Effect: Allow
+              Action:
+                - ec2:CreateTags
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  "ec2:CreateAction":
+                    - RunInstances
+                    - CreateVolume
+                    - CreateSecurityGroup
+                    - CreateKeyPair
+
+            - Sid: EC2SerialConsole
+              # Account-level action — no resource scoping available
+              Effect: Allow
+              Action:
+                - ec2:EnableSerialConsoleAccess
+                - ec2:DisableSerialConsoleAccess
+              Resource: "*"
+
+            - Sid: EC2InstanceConnect
+              Effect: Allow
+              Action:
+                - ec2-instance-connect:SendSerialConsoleSSHPublicKey
+              Resource: "arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:instance/*"
+              Condition:
+                StringEquals:
+                  "ec2:ResourceTag/Name": "{{ host_name }}"
+
+            - Sid: IAMPassRoleToEC2
+              # Required for attaching an instance profile during RunInstances
+              Effect: Allow
+              Action:
+                - iam:PassRole
+              Resource: "arn:aws:iam::{{ aws_account_id }}:role/{{ host_name }}-*"
+              Condition:
+                StringEquals:
+                  "iam:PassedToService": "ec2.amazonaws.com"
 
     # -------------------------------------------------------------------------
-    # Access key — delete any existing key then create fresh via CLI so the
-    # secret is always returned.  The amazon.aws.iam_access_key module
-    # inconsistently omits secret_access_key; the CLI always returns it.
+    # IAM Policy — scoped to roles/profiles/users named {host_name}-*
+    # -------------------------------------------------------------------------
+    - name: Attach IAM inline policy
+      amazon.aws.iam_policy:
+        iam_type: user
+        iam_name: "{{ deployer_user_name }}"
+        policy_name: "{{ host_name }}-deployer-iam"
+        state: present
+        policy_json:
+          Version: "2012-10-17"
+          Statement:
+
+            - Sid: IAMRoleManagement
+              Effect: Allow
+              Action:
+                - iam:CreateRole
+                - iam:DeleteRole
+                - iam:GetRole
+                - iam:UpdateRole
+                - iam:TagRole
+                - iam:ListRolePolicies
+                - iam:ListAttachedRolePolicies
+                - iam:PutRolePolicy
+                - iam:DeleteRolePolicy
+                - iam:GetRolePolicy
+                - iam:AttachRolePolicy
+                - iam:DetachRolePolicy
+              Resource: "arn:aws:iam::{{ aws_account_id }}:role/{{ host_name }}-*"
+
+            - Sid: IAMInstanceProfileManagement
+              Effect: Allow
+              Action:
+                - iam:CreateInstanceProfile
+                - iam:DeleteInstanceProfile
+                - iam:GetInstanceProfile
+                - iam:AddRoleToInstanceProfile
+                - iam:RemoveRoleFromInstanceProfile
+                - iam:TagInstanceProfile
+              Resource: "arn:aws:iam::{{ aws_account_id }}:instance-profile/{{ host_name }}-*"
+
+            - Sid: IAMDeployerUserManagement
+              # Self-managing: deployer can manage its own user and access keys
+              Effect: Allow
+              Action:
+                - iam:CreateUser
+                - iam:DeleteUser
+                - iam:GetUser
+                - iam:TagUser
+                - iam:CreateAccessKey
+                - iam:DeleteAccessKey
+                - iam:ListAccessKeys
+                - iam:UpdateAccessKey
+                - iam:AttachUserPolicy
+                - iam:DetachUserPolicy
+                - iam:PutUserPolicy
+                - iam:DeleteUserPolicy
+                - iam:ListUserPolicies
+                - iam:ListAttachedUserPolicies
+              Resource: "arn:aws:iam::{{ aws_account_id }}:user/{{ host_name }}-*"
+
+            - Sid: IAMReadManagedPolicies
+              # Required to attach AWS managed policies (e.g. AmazonSSMManagedInstanceCore)
+              Effect: Allow
+              Action:
+                - iam:GetPolicy
+                - iam:GetPolicyVersion
+                - iam:ListPolicies
+              Resource: "*"
+
+    # -------------------------------------------------------------------------
+    # STS Policy — GetCallerIdentity only
+    # -------------------------------------------------------------------------
+    - name: Attach STS inline policy
+      amazon.aws.iam_policy:
+        iam_type: user
+        iam_name: "{{ deployer_user_name }}"
+        policy_name: "{{ host_name }}-deployer-sts"
+        state: present
+        policy_json:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: STSCallerIdentity
+              Effect: Allow
+              Action:
+                - sts:GetCallerIdentity
+              Resource: "*"
+
+    # -------------------------------------------------------------------------
+    # Access key
     # -------------------------------------------------------------------------
     - name: List existing access keys for deployer user
       ansible.builtin.command:
@@ -98,7 +334,7 @@
           --output json
       register: access_key_raw
       changed_when: true
-      no_log: true   # suppress key material from plain-text logs
+      no_log: true
 
     - name: Store access key credentials
       ansible.builtin.set_fact:
@@ -114,17 +350,27 @@
         msg: |
 
           ✓ IAM User: {{ deployer_user_name }}
+            Account:  {{ aws_account_id }}
 
-            Policies:
-              AmazonEC2FullAccess
-              AmazonS3FullAccess
-              IAMFullAccess
-              SecretsManagerReadWrite
-              CloudWatchLogsFullAccess
+            Policies (scoped to {{ host_name }}* resources):
+              {{ host_name }}-deployer-ec2
+                EC2 describe:    Resource:* (AWS requirement for Describe actions)
+                Security groups: {{ host_name }}-* tag only
+                Key pairs:       {{ host_name }}-* name only
+                Instances:       Name={{ host_name }} tag only
+                Volumes:         {{ host_name }}-* tag only
 
-            ⚠  Access Key (save this now — shown only once):
-              Access Key ID:     {{ deployer_key_id }}
-              Secret Access Key: {{ deployer_secret_key }}
+              {{ host_name }}-deployer-iam
+                Roles:           arn:aws:iam::{{ aws_account_id }}:role/{{ host_name }}-*
+                Instance profiles: arn:aws:iam::{{ aws_account_id }}:instance-profile/{{ host_name }}-*
+                Users:           arn:aws:iam::{{ aws_account_id }}:user/{{ host_name }}-*
+
+              {{ host_name }}-deployer-sts
+                sts:GetCallerIdentity only
+
+          ⚠  Access Key (save this now — shown only once):
+               Access Key ID:     {{ deployer_key_id }}
+               Secret Access Key: {{ deployer_secret_key }}
 
             Next steps:
               1.  aws configure   (enter the key above, replace root credentials)

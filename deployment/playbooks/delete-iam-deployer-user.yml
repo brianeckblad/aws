@@ -1,8 +1,8 @@
 ---
 # delete-iam-deployer-user.yml — Remove the IAM deployer user
 #
-# Deletes the {{ host_name }}-deployer IAM user, detaches all policies,
-# and removes any access keys.
+# Deletes the {{ host_name }}-deployer IAM user, removes all inline policies,
+# and deletes any access keys.
 #
 # ⚠ Run this only when decommissioning the server entirely.
 #    Once deleted you will need root credentials to create a replacement.
@@ -19,27 +19,23 @@
 
   vars:
     deployer_user_name: "{{ host_name }}-deployer"
-    deployer_managed_policies:
-      - "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
-      - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
-      - "arn:aws:iam::aws:policy/IAMFullAccess"
-      - "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
-      - "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+    deployer_inline_policies:
+      - "{{ host_name }}-deployer-ec2"
+      - "{{ host_name }}-deployer-iam"
+      - "{{ host_name }}-deployer-sts"
 
   tasks:
     # -------------------------------------------------------------------------
-    # Detach managed policies (required before user can be deleted)
+    # Delete inline policies (required before user can be deleted)
     # -------------------------------------------------------------------------
-    - name: Detach each managed policy
-      ansible.builtin.command:
-        cmd: >
-          aws iam detach-user-policy
-          --user-name {{ deployer_user_name }}
-          --policy-arn {{ item }}
-          --region {{ aws_region }}
-      loop: "{{ deployer_managed_policies }}"
-      changed_when: true
-      ignore_errors: true   # policy may already be detached
+    - name: Delete each inline policy
+      amazon.aws.iam_policy:
+        iam_type: user
+        iam_name: "{{ deployer_user_name }}"
+        policy_name: "{{ item }}"
+        state: absent
+      loop: "{{ deployer_inline_policies }}"
+      ignore_errors: true   # policy may already be absent
 
     # -------------------------------------------------------------------------
     # Access keys — must be deleted before the user can be removed
