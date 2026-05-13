@@ -6,7 +6,7 @@
 #
 # Policies follow least-privilege:
 #   S3              — only buckets matching {host_name}-* prefix
-#   Secrets Manager — only secrets under {host_name}/* and {app_name}/* paths
+#   Secrets Manager — only secrets under {host_name}/* (apps namespace within)
 #   CloudWatch      — metrics + logs (resource: * required by AWS; actions are scoped)
 #   SNS             — only topics matching {host_name}-* prefix
 #   SSM             — Session Manager (AWSManagedInstanceCore)

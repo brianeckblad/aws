@@ -5,113 +5,42 @@
 # This repo provisions and hardens a shared EC2 server.
 # App-level config (git, Flask, gunicorn, S3, SSL, eBay, etc.) lives in
 # each application's own vault.yml.
-# ============================================================================
 #
-# ============================================================================
-# DEPLOYMENT CONFIGURATION — SINGLE SOURCE OF TRUTH
-# ============================================================================
 # Setup:
 #   1. Copy:    cp vault.yml.example vault.yml
-#   2. Edit:    nano vault.yml   (or: ansible-vault edit ...)
+#   2. Edit:    nano vault.yml
 #   3. Encrypt: ansible-vault encrypt vault.yml --vault-password-file ~/.vault_pass
 #
 # Edit:    ansible-vault edit group_vars/vault.yml --vault-password-file ~/.vault_pass
 # View:    ansible-vault view group_vars/vault.yml --vault-password-file ~/.vault_pass
-# Encrypt: ansible-vault encrypt group_vars/vault.yml --vault-password-file ~/.vault_pass
-#
-# ============================================================================
-# SHARED SERVER MODEL
-# ============================================================================
-# One EC2 instance hosts multiple applications.
-#
-# Two-phase deployment:
-#
-#   Phase 1 — Server foundation (run ONCE per server):
-#     ansible-playbook playbooks/provision-server.yml \
-#       --vault-password-file ~/.vault_pass
-#
-#     Creates: security group, IAM role, SSH key pair, EC2 instance,
-#              OS hardening, nginx, supervisor, fail2ban, UFW.
-#
-#   Phase 2 — App deployment (run ONCE per app, then update.yml for upgrades):
-#     ansible-playbook playbooks/setup.yml \
-#       --vault-password-file ~/.vault_pass
-#
-#     Creates: nginx vhost, SSL certificate, supervisor program,
-#              Python venv, app code, cron jobs.
-#
-# Multi-app on one server:
-#   The "SERVER" sections below describe the shared EC2 host.
-#   The "APPLICATION" sections describe the specific app you are deploying.
-#   To add a second app, copy only the APPLICATION sections into that app's
-#   vault.yml, set a unique app_name, server_name (FQDN), and gunicorn_port,
-#   then run setup.yml from that app's repo.
-#   The SERVER sections (EC2, IAM, SG, SSH key) do not change between apps.
 # ============================================================================
 
 
 # ============================================================================
-# SERVER — Used by provision-server.yml and foundation playbooks
-# Change these only when standing up a new server.
+# SERVER IDENTITY
+# Drives all AWS resource names:
+#   EC2 Name tag    → host_name
+#   Security group  → {host_name}-sg
+#   IAM role        → {host_name}-ec2-role
+#   SSH key pair    → {host_name}-key
 # ============================================================================
+host_name: "your-server-name"   # lowercase, hyphens ok (e.g. web01, prod-server)
+admin_user: "ubuntu"            # SSH login user on Ubuntu EC2 AMIs
 
-# Short lowercase name for the EC2 instance and all AWS resources.
-# Use hyphens if needed.  Examples: web01  prod-server
-host_name: "awshosting"
 
-# SSH login user on Ubuntu EC2 AMIs
-admin_user: "ubuntu"
-
-# AWS region for all resources (EC2, IAM, S3, Secrets Manager)
+# ============================================================================
+# AWS
+# ============================================================================
 aws_region: "us-east-2"
-
-# AWS root account email (used to enable EC2 serial console access)
-aws_root_account_email: "you@example.com"
-
-
-# ============================================================================
-# AWS RESOURCE NAMES
-# Every AWS resource that gets a name is explicitly declared here so that
-# vault.yml is the single source of truth.  The defaults derive from
-# host_name — override only when you need a custom name.
-# ============================================================================
-
-# EC2 / networking
-security_group_name:       "{{ host_name }}-sg"
-
-# IAM
-iam_role_name:             "{{ host_name }}-ec2-role"
-iam_instance_profile_name: "{{ host_name }}-instance-profile"
-
-# IAM inline policy names (one per permission boundary)
-iam_policy_s3:             "{{ host_name }}-s3-access"
-iam_policy_secrets:        "{{ host_name }}-secrets-access"
-iam_policy_cloudwatch:     "{{ host_name }}-cloudwatch-access"
-iam_policy_sns:            "{{ host_name }}-sns-access"
-iam_policy_serial_console: "{{ host_name }}-serial-console-access"
-
-# SSH key pair
-ssh_key_name: "{{ host_name }}-key"
-ssh_key_file: "~/.ssh/{{ host_name }}-key.pem"
-
-# EBS volume tag names (visible in the AWS Console)
-ebs_boot_volume_name: "{{ host_name }}-boot"
-ebs_data_volume_name: "{{ host_name }}-data"
 
 
 # ============================================================================
 # EC2 INSTANCE
 # ============================================================================
-
-# Instance type.  t3.small handles 2–4 light apps comfortably.
-# Nitro-based types (t3, t3a, t4g, m5, m6, c5, c6i, r5, r6i…) expose EBS
-# as NVMe (/dev/nvme1n1). If you switch to an older type (t2, m4) update
-# ebs_nvme_device below.
-ec2_instance_type: "t3.small"
-
+ec2_instance_type: "t3.small"       # t3.small handles 2-4 light apps comfortably
 assign_public_ip: true
-ec2_monitoring_enabled: false         # true = detailed CloudWatch metrics
-ec2_termination_protection: true      # Prevent accidental deletion
+ec2_monitoring_enabled: false        # true = detailed CloudWatch metrics ($)
+ec2_termination_protection: true     # Prevent accidental deletion
 ec2_ebs_optimized: false
 ec2_source_dest_check: true
 
@@ -121,189 +50,14 @@ ec2_source_dest_check: true
 # Mounted at apps_root — all app code and data live here.
 # This volume SURVIVES instance termination (ebs_data_delete_on_termination: false).
 # ============================================================================
-
 apps_root: "/opt/apps"               # Parent directory for all app code
 logs_root: "/var/log/apps"           # Parent directory for all app logs
 
 ebs_volume_size: 100                 # GB — shared across all apps on this server
 ebs_volume_type: "gp3"
 ebs_volume_encrypted: true
-ebs_boot_delete_on_termination: true   # Root volume deleted on terminate (safe)
-ebs_data_delete_on_termination: false  # Data volume survives terminate (REQUIRED)
-ebs_volume_snapshot_id: ""            # Set to restore from an existing snapshot
+ebs_boot_delete_on_termination: true    # Root volume deleted on terminate (safe)
+ebs_data_delete_on_termination: false   # Data volume SURVIVES terminate (REQUIRED)
+ebs_volume_snapshot_id: ""             # Set to restore from an existing snapshot
 ebs_device_name: "/dev/sdf"           # EC2 API device name
-ebs_nvme_device: "/dev/nvme1n1"       # Device path on Nitro instances (NVMe)
-
-
-# ============================================================================
-# SYSTEM PACKAGES
-# Installed during server hardening (harden-server.yml).
-# These are server-level, not per-app.
-# ============================================================================
-system_packages:
-  - python3
-  - python3-pip
-  - python3-venv
-  - python3-dev
-  - build-essential
-  - nginx
-  - supervisor
-  - certbot
-  - python3-certbot-nginx
-  - fail2ban
-  - ufw
-  - ssl-cert
-  - git
-  - curl
-  - net-tools
-  - xfsprogs
-  - rsyslog
-  - logrotate
-  - unattended-upgrades
-  - apt-listchanges
-  - libjpeg-dev
-  - zlib1g-dev
-  - libpng-dev
-
-
-# ============================================================================
-# APPLICATION — Used by setup.yml and update.yml
-# Change these per-app. Each app on this server needs unique values for:
-#   app_name      – drives all app paths, groups, log dirs, supervisor names
-#   server_name   – the FQDN nginx routes on (must point to this server's IP)
-#   gunicorn_port – unique loopback port per app (app1=8000, app2=8001, …)
-# ============================================================================
-
-app_name: "your_app_name"            # Lowercase, hyphens ok (e.g., awshosting, api-service)
-app_display_name: "My Application"   # Human-readable for supervisor/nginx labels
-service_name: "{{ app_name }}"       # Supervisor and systemd service name
-
-# DNS name that nginx matches for this app.
-# Must resolve to this server's public IP BEFORE running setup.yml.
-# Let's Encrypt will fail if DNS is not pointed here.
-server_name: "your-app.example.com"
-
-ssl_email: "admin@example.com"       # Let's Encrypt notification email
-
-
-# ============================================================================
-# APP RUNTIME USER
-# ============================================================================
-
-# Runtime user for this app. Options:
-#   "www-data"  — already exists on Ubuntu; fine for single-app or low-security
-#   "appname"   — dedicated per-app user (stronger isolation if multiple apps)
-# The app user has no shell and cannot SSH to the server.
-app_user: "www-data"
-
-
-# ============================================================================
-# GIT
-# ============================================================================
-
-git_branch: "main"
-git_repo_url: "https://github.com/YOUR_USERNAME/YOUR_APP.git"
-git_token: ""                        # GitHub PAT (required for private repos)
-
-# Derived — injects token into HTTPS URL when git_token is set
-git_repo: "{{ git_repo_url | replace('https://', 'https://' + git_token + '@') if git_token | default('') else git_repo_url }}"
-
-
-# ============================================================================
-# AWS (per-app)
-# ============================================================================
-
-s3_bucket_name: "your-unique-bucket-name"   # Must be globally unique
-s3_folder: "data"
-secret_name: "{{ app_name }}/production"    # Secrets Manager path for this app
-sns_topic_arn: ""                           # SNS topic ARN for alerts (optional)
-
-
-# ============================================================================
-# APPLICATION CREDENTIALS
-# ============================================================================
-
-app_default_username: "admin"
-app_default_password: "change-this-password"
-users: "admin:change-this-password"          # Format: user1:pass1,user2:pass2
-
-
-# ============================================================================
-# FLASK
-# ============================================================================
-
-# Generate: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-secret_key: "change-this-to-a-random-secret-key"
-flask_env: "production"
-
-
-# ============================================================================
-# PERFORMANCE (per-app)
-#
-# gunicorn_port is the key value to change when deploying multiple apps:
-#   app 1: 8000
-#   app 2: 8001
-#   app 3: 8002
-# All other port variables derive from this single value.
-# ============================================================================
-
-gunicorn_port: "8000"                        # MUST be unique per app on this server
-gunicorn_bind: "127.0.0.1:{{ gunicorn_port }}"
-app_port: "{{ gunicorn_port }}"
-flask_port: "{{ gunicorn_port }}"
-
-gunicorn_workers: 2                          # Conservative for shared server (2 workers/app)
-gunicorn_timeout: 120
-python_version: "3.10"
-
-
-# ============================================================================
-# APP PATHS (derived from server vars — do not hard-code these)
-# ============================================================================
-
-app_dir:      "{{ apps_root }}/{{ app_name }}"      # e.g. /opt/apps/awshosting
-log_dir:      "{{ logs_root }}/{{ app_name }}"      # e.g. /var/log/apps/awshosting
-venv_dir:     "{{ app_dir }}/.venv"
-instance_dir: "{{ app_dir }}/instance"
-
-
-# ============================================================================
-# LOG RETENTION (per-app)
-# ============================================================================
-
-log_retention_days: 20
-log_max_size: "10M"
-
-
-# ============================================================================
-# BACKUPS (per-app)
-# ============================================================================
-
-backup_cleanup_hour: "3"              # UTC hour to run cleanup (0–23)
-backup_cleanup_minute: "0"
-backup_retention_days: 30
-s3_version_retention_days: 30
-
-
-# ============================================================================
-# CLOUDFRONT — optional, per-app CDN
-# ============================================================================
-
-enable_cloudfront: false
-cloudfront_price_class: "PriceClass_100"   # PriceClass_100 | PriceClass_200 | PriceClass_All
-cloudfront_domain: ""                      # Filled after CloudFront is provisioned
-# Generate: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-app_secret_token: ""
-
-
-# ============================================================================
-# eBay API — optional; only for apps using eBay integration
-# ============================================================================
-
-ebay_environment: "production"            # sandbox | production
-ebay_production_dev_id: ""
-ebay_production_cert_id: ""
-ebay_production_app_id: ""
-ebay_production_token: ""
-ebay_verification_token: ""
-
+ebs_nvme_device: "/dev/nvme1n1"       # NVMe path on Nitro instances (t3, m5, etc.)
