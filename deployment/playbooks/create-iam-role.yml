@@ -91,9 +91,9 @@
               Resource: "arn:aws:s3:::{{ host_name }}-*"
 
     # -------------------------------------------------------------------------
-    # Secrets Manager — scoped to secrets under {host_name}/* and {app_name}/*
-    # paths only. AWS appends a 6-char suffix to secret names (hence the
-    # trailing wildcard on each path).
+    # Secrets Manager — scoped to secrets under {host_name}/* only.
+    # Apps should namespace their secrets as {host_name}/{app_name}/...
+    # AWS appends a 6-char random suffix to secret ARNs (hence trailing *).
     # -------------------------------------------------------------------------
     - name: Attach Secrets Manager access policy
       amazon.aws.iam_policy:
@@ -116,13 +116,13 @@
                 - secretsmanager:ListSecrets
               Resource:
                 - "arn:aws:secretsmanager:{{ aws_region }}:{{ aws_account_id }}:secret:{{ host_name }}/*"
-                - "arn:aws:secretsmanager:{{ aws_region }}:{{ aws_account_id }}:secret:{{ app_name }}/*"
 
     # -------------------------------------------------------------------------
     # CloudWatch — metrics and logs.
     # AWS does not support resource-level restrictions on PutMetricData or most
     # log actions, so Resource: "*" is required here. The actions are scoped to
     # only what the server needs (write + describe; no delete).
+    # Log groups should be named /{host_name}/... by apps on this server.
     # -------------------------------------------------------------------------
     - name: Attach CloudWatch access policy
       amazon.aws.iam_policy:
@@ -151,8 +151,6 @@
               Resource:
                 - "arn:aws:logs:{{ aws_region }}:{{ aws_account_id }}:log-group:/{{ host_name }}/*"
                 - "arn:aws:logs:{{ aws_region }}:{{ aws_account_id }}:log-group:/{{ host_name }}/*:*"
-                - "arn:aws:logs:{{ aws_region }}:{{ aws_account_id }}:log-group:/{{ app_name }}/*"
-                - "arn:aws:logs:{{ aws_region }}:{{ aws_account_id }}:log-group:/{{ app_name }}/*:*"
 
     # -------------------------------------------------------------------------
     # SNS — scoped to topics matching the {host_name}-* prefix only.
@@ -222,11 +220,12 @@
                 S3 buckets:   arn:aws:s3:::{{ host_name }}-*
 
               {{ iam_policy_secrets }}
-                Secrets:      {{ host_name }}/* and {{ app_name }}/*
+                Secrets:      arn:aws:secretsmanager:...:secret:{{ host_name }}/*
+                              (apps should namespace as {{ host_name }}/{app_name}/...)
 
               {{ iam_policy_cloudwatch }}
                 Metrics:      resource:* (AWS requirement)
-                Logs:         /{{ host_name }}/* and /{{ app_name }}/*
+                Logs:         /{{ host_name }}/* log groups
 
               {{ iam_policy_sns }}
                 Topics:       arn:aws:sns:{{ aws_region }}:{{ aws_account_id }}:{{ host_name }}-*
