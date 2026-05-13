@@ -44,6 +44,7 @@
       - git
       - unzip
       - htop
+at t      - net-tools
       # Security
       - ufw
       - fail2ban
