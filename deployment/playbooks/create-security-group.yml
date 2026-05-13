@@ -23,6 +23,23 @@
 
   tasks:
     # -------------------------------------------------------------------------
+    # Detect deployer IP — used to restrict SSH to the machine running Ansible.
+    # Override by setting ssh_allowed_cidr in vault.yml (e.g. "203.0.113.0/24").
+    # -------------------------------------------------------------------------
+    - name: Detect deployer public IP
+      ansible.builtin.command: curl -4 -s --max-time 10 ifconfig.me
+      register: deployer_ip_raw
+      changed_when: false
+
+    - name: Set SSH CIDR fact
+      set_fact:
+        ssh_cidr: "{{ ssh_allowed_cidr | default(deployer_ip_raw.stdout | trim + '/32') }}"
+
+    - name: Show SSH restriction
+      debug:
+        msg: "SSH (port 22) will be restricted to: {{ ssh_cidr }}"
+
+    # -------------------------------------------------------------------------
     # Look up the default VPC — avoids hardcoding a VPC ID in the vault while
     # still giving the module the explicit vpc_id it requires.
     # Override by setting vpc_id in vault.yml if you use a custom VPC.
@@ -51,14 +68,13 @@
         region: "{{ aws_region }}"
 
         rules:
-          # SSH — server administration.
-          # SECURITY: Restrict to known IPs in production.
-          # Replace 0.0.0.0/0 with your office/home CIDR or VPN range.
+          # SSH — restricted to deployer IP (or ssh_allowed_cidr from vault.yml).
+          # Never open to 0.0.0.0/0 in production.
           - proto: tcp
             from_port: 22
             to_port: 22
-            cidr_ip: 0.0.0.0/0
-            rule_desc: "SSH - server administration (restrict to known IPs)"
+            cidr_ip: "{{ ssh_cidr }}"
+            rule_desc: "SSH - restricted to {{ ssh_cidr }}"
 
           # HTTP — nginx receives and redirects to HTTPS
           - proto: tcp
@@ -89,16 +105,13 @@
             Region: {{ aws_region }}
 
             Inbound:
-              22  (TCP) - SSH   from 0.0.0.0/0
+              22  (TCP) - SSH   from {{ ssh_cidr }}
               80  (TCP) - HTTP  from 0.0.0.0/0
               443 (TCP) - HTTPS from 0.0.0.0/0
 
             Outbound: all traffic allowed
 
-            ⚠  PRODUCTION RECOMMENDATION:
-            Restrict SSH (port 22) to known IPs:
-              - Your office CIDR
-              - Your home IP
-              - VPN egress range
-            Edit the security group in AWS Console or update this playbook.
+            ℹ  SSH is locked to {{ ssh_cidr }}.
+               To allow a different IP, set ssh_allowed_cidr in vault.yml
+               and re-run this playbook, or update the rule in the AWS Console.
 

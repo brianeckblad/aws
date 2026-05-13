@@ -33,6 +33,12 @@ admin_user: "ubuntu"            # SSH login user on Ubuntu EC2 AMIs
 # ============================================================================
 aws_region: "us-east-2"
 
+# SSH CIDR restriction — applied to the EC2 security group (port 22).
+# If not set, defaults to the deployer machine's public IP at provision time.
+# Set a fixed CIDR if you have a static office/VPN IP (e.g. "203.0.113.0/24").
+# To allow multiple IPs, update the security group rule in AWS after provisioning.
+# ssh_allowed_cidr: "YOUR_IP/32"
+
 
 # ============================================================================
 # EC2 INSTANCE
