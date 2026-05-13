@@ -44,7 +44,7 @@
       - git
       - unzip
       - htop
-at t      - net-tools
+      - net-tools
       # Security
       - ufw
       - fail2ban
@@ -144,15 +144,6 @@ at t      - net-tools
         cache_valid_time: 3600
       register: apt_upgrade
 
-    - name: Check if reboot is required after upgrade
-      stat:
-        path: /var/run/reboot-required
-      register: reboot_required_file
-
-    - name: Warn if reboot required
-      debug:
-        msg: "⚠  Reboot required — run: ssh {{ admin_user }}@HOST 'sudo reboot'"
-      when: reboot_required_file.stat.exists
 
     - name: Install server packages
       apt:
@@ -457,7 +448,25 @@ at t      - net-tools
         mode: '0644'
 
     # =========================================================================
-    # SUMMARY
+    # REBOOT
+    # Always reboot after initial hardening so the new kernel and all config
+    # changes (sysctl, SSH, fstab) take full effect from a clean boot.
+    # ansible.builtin.reboot issues the reboot, waits for the machine to go
+    # offline, then polls until SSH is accepting connections again before
+    # continuing — no manual waiting required.
+    # =========================================================================
+
+    - name: Reboot to apply kernel upgrades and all hardening changes
+      ansible.builtin.reboot:
+        msg: "Rebooting after initial server hardening"
+        pre_reboot_delay: 5
+        post_reboot_delay: 15
+        reboot_timeout: 300
+        connect_timeout: 20
+        test_command: uptime
+
+    # =========================================================================
+    # SUMMARY — printed after server comes back up
     # =========================================================================
 
     - name: Display server hardening summary
@@ -487,10 +496,11 @@ at t      - net-tools
               supervisor - running, no programs (apps add their own)
               rsyslog    - system logging active
 
+            ✓ Server rebooted and back online — all changes active.
+
             Deploy an app:
               ansible-playbook playbooks/setup.yml --vault-password-file ~/.vault_pass
 
-          {{ '  ⚠  REBOOT REQUIRED - run: sudo reboot' if reboot_required_file.stat.exists else '  No reboot required.' }}
 
   handlers:
 
