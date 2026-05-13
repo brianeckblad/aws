@@ -3,18 +3,13 @@
 # Decommission - Resource Discovery and Teardown
 # Supported shells: bash, zsh
 #
-# Interactive wrapper that checks for existing resources before
-# calling the decommission playbook.  Provides graceful exits
-# when there is nothing to tear down.
+# Discovers ALL AWS resources for this server (EC2, SG, IAM role, SSH key)
+# and runs the decommission playbook if any exist.
+# Safe to run even after partial teardown or manual EC2 deletion.
 #
 # Usage:
 #   cd deployment
 #   ./scripts/decommission.sh
-#
-# What it does:
-#   1. Presents a discovery menu (AWS / local files / new deployment)
-#   2. Checks whether resources actually exist
-#   3. Only calls the playbook when there is something to remove
 
 set -e
 
@@ -68,7 +63,6 @@ _read_vault_key() {
     fi
 }
 
-# host_name drives all AWS resource names (EC2 tag, SG, IAM role, key pair)
 host_name=$(_read_vault_key "host_name")
 if [[ -z "$host_name" ]]; then
     echo -e "${RED}ERROR: host_name not set in vault.yml${NC}"
@@ -80,8 +74,12 @@ if [[ -z "$aws_region" ]]; then
     aws_region="us-east-2"
 fi
 
+if ! command -v aws &>/dev/null; then
+    echo -e "${RED}ERROR: AWS CLI not installed.${NC}"
+    exit 1
+fi
 
-# ── Discovery menu ───────────────────────────────────────────────────
+# ── Discover all resources ───────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║            Decommission — Resource Discovery             ║"
@@ -90,80 +88,95 @@ echo ""
 echo "  Server: $host_name"
 echo "  Region: $aws_region"
 echo ""
-echo "    1) Query AWS for live instance data"
-echo "    2) This is a new deployment (nothing to decommission)"
+echo "Scanning AWS for resources named '${host_name}-*' ..."
 echo ""
-printf "  Enter choice [1-2]: "
-read -r menu_choice
 
-case "$menu_choice" in
+found_any=false
 
-    # ── Option 1: Query AWS ──────────────────────────────────────
-    1)
-        echo ""
-        echo "Querying AWS for EC2 instances named '$host_name' in $aws_region..."
+# EC2 instance
+ec2_json=$(aws ec2 describe-instances \
+    --filters "Name=tag:Name,Values=$host_name" \
+              "Name=instance-state-name,Values=running,stopped,stopping,pending" \
+    --query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name,IP:PublicIpAddress,Type:InstanceType}' \
+    --region "$aws_region" --output json 2>/dev/null) || ec2_json="[]"
 
-        if ! command -v aws &>/dev/null; then
-            echo -e "${RED}ERROR: AWS CLI not installed.${NC}"
-            exit 1
-        fi
+ec2_count=0
+if [[ -n "$ec2_json" && "$ec2_json" != "[]" ]]; then
+    ec2_count=$(python3 -c "import json; print(len(json.loads('''$ec2_json''')))" 2>/dev/null || echo 0)
+fi
 
-        aws_json=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=$host_name" \
-                      "Name=instance-state-name,Values=running,stopped,stopping,pending" \
-            --query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name,IP:PublicIpAddress,Type:InstanceType}' \
-            --region "$aws_region" --output json 2>/dev/null) || true
-
-        aws_count=0
-        if [[ -n "$aws_json" && "$aws_json" != "[]" ]]; then
-            aws_count=$(python3 -c "import json; print(len(json.loads('''$aws_json''')))" 2>/dev/null || echo 0)
-        fi
-
-        if [[ "$aws_count" -eq 0 ]]; then
-            echo ""
-            echo "  No instances named '$host_name' found in $aws_region."
-            echo ""
-            exit 0
-        fi
-
-        echo ""
-        echo -e "${GREEN}Found $aws_count instance(s) in AWS:${NC}"
-        echo ""
-        python3 -c "
+if [[ "$ec2_count" -gt 0 ]]; then
+    echo -e "  ${GREEN}✓ EC2 instance(s):${NC} $ec2_count found"
+    python3 -c "
 import json
-data = json.loads('''$aws_json''')
+data = json.loads('''$ec2_json''')
 for i in data:
     ip = i.get('IP') or 'no public IP'
-    print(f'  {i[\"ID\"]}  {i[\"State\"]:<10s}  {ip:<16s}  {i[\"Type\"]}')
+    print(f'      {i[\"ID\"]}  {i[\"State\"]:<10s}  {ip:<16s}  {i[\"Type\"]}')
 " 2>/dev/null
-        echo ""
-        echo "These resources will be targeted for decommission."
-        ;;
+    found_any=true
+else
+    echo -e "  ${YELLOW}–  EC2 instance:${NC}     not found (already deleted or never created)"
+fi
 
-    # ── Option 2: New deployment ─────────────────────────────────
-    2)
-        echo ""
-        echo "  Nothing to decommission."
-        echo ""
-        exit 0
-        ;;
+# Security group
+sg_result=$(aws ec2 describe-security-groups \
+    --group-names "${host_name}-sg" \
+    --region "$aws_region" \
+    --query 'SecurityGroups[0].GroupId' \
+    --output text 2>/dev/null) || sg_result=""
 
-    # ── Invalid ──────────────────────────────────────────────────
-    *)
-        echo -e "${RED}Invalid choice. Run again and enter 1 or 2.${NC}"
-        exit 1
-        ;;
-esac
+if [[ -n "$sg_result" && "$sg_result" != "None" ]]; then
+    echo -e "  ${GREEN}✓ Security group:${NC}    ${host_name}-sg  ($sg_result)"
+    found_any=true
+else
+    echo -e "  ${YELLOW}–  Security group:${NC}   not found"
+fi
+
+# IAM role
+iam_result=$(aws iam get-role \
+    --role-name "${host_name}-ec2-role" \
+    --query 'Role.RoleName' \
+    --output text 2>/dev/null) || iam_result=""
+
+if [[ -n "$iam_result" && "$iam_result" != "None" ]]; then
+    echo -e "  ${GREEN}✓ IAM role:${NC}          ${host_name}-ec2-role"
+    found_any=true
+else
+    echo -e "  ${YELLOW}–  IAM role:${NC}          not found"
+fi
+
+# SSH key pair
+key_result=$(aws ec2 describe-key-pairs \
+    --key-names "${host_name}-key" \
+    --region "$aws_region" \
+    --query 'KeyPairs[0].KeyName' \
+    --output text 2>/dev/null) || key_result=""
+
+if [[ -n "$key_result" && "$key_result" != "None" ]]; then
+    echo -e "  ${GREEN}✓ SSH key pair:${NC}      ${host_name}-key"
+    found_any=true
+else
+    echo -e "  ${YELLOW}–  SSH key pair:${NC}      not found"
+fi
+
+echo ""
+
+# ── Nothing to do ────────────────────────────────────────────────────
+if [[ "$found_any" != "true" ]]; then
+    echo "  No AWS resources found for '$host_name'. Nothing to decommission."
+    echo ""
+    exit 0
+fi
 
 # ── Confirm before calling the playbook ──────────────────────────────
-echo ""
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║  ⚠️  DESTRUCTIVE OPERATION — ALL DATA WILL BE DELETED   ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
-echo "  This will permanently delete ALL AWS resources for server '$host_name'."
+echo "  All resources listed above will be permanently deleted."
 echo ""
-printf "  Type the server name to confirm: "
+printf "  Type the server name to confirm [%s]: " "$host_name"
 read -r confirm
 
 if [[ "$confirm" != "$host_name" ]]; then
