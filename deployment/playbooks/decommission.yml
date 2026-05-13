@@ -1,23 +1,21 @@
 ---
-# decommission.yml — Permanently destroy the shared EC2 server and all its AWS resources
+# decommission.yml — Permanently destroy the shared EC2 server and ALL its AWS resources
 #
 # ⚠  WARNING: DESTRUCTIVE AND IRREVERSIBLE
 #
-# Deletes (in reverse order of creation):
+# Deletes (in order):
 #   1. EC2 instance
-#   2. SSH key pair (AWS + local ~/.ssh file)
-#   3. Security group
-#   4. IAM role, instance profile, and all inline policies
+#   2. EBS data volume          (survives instance termination — deleted here)
+#   3. SSH key pair             (AWS + local ~/.ssh file + ~/.ssh/config entry)
+#   4. Security group
+#   5. IAM role, instance profile, and all inline policies
+#   6. IAM deployer user        (LAST — invalidates current credentials)
 #
 # What is NOT deleted (app-level — each app manages its own):
 #   - S3 buckets
 #   - Secrets Manager entries
 #   - CloudFront distributions
-#   - WAF web ACLs
 #   - CloudWatch log groups / alarms
-#
-# The EBS data volume survives instance termination (ebs_data_delete_on_termination: false).
-# It must be manually deleted in the AWS Console if no longer needed.
 #
 # Recommended usage (uses decommission.sh wrapper for confirmation):
 #   cd deployment
@@ -27,12 +25,6 @@
 #   ansible-playbook playbooks/decommission.yml \
 #     --vault-password-file ~/.vault_pass \
 #     -e decommission_confirmed=true
-#
-# To delete a single resource instead:
-#   ansible-playbook playbooks/terminate-ec2-instance.yml --vault-password-file ~/.vault_pass
-#   ansible-playbook playbooks/delete-ssh-key.yml         --vault-password-file ~/.vault_pass
-#   ansible-playbook playbooks/delete-security-group.yml  --vault-password-file ~/.vault_pass
-#   ansible-playbook playbooks/delete-iam-role.yml        --vault-password-file ~/.vault_pass
 
 # ==============================================================================
 # Safety gate
@@ -60,24 +52,24 @@
         msg: |
 
           ╔══════════════════════════════════════════════════════════╗
-          ║   ⚠  DECOMMISSIONING SERVER - {{ host_name }}
+          ║   ⚠  DECOMMISSIONING ALL RESOURCES - {{ host_name }}
           ╚══════════════════════════════════════════════════════════╝
 
             Region: {{ aws_region }}
 
             Will delete:
               1. EC2 instance             (Name={{ host_name }})
-              2. SSH key pair             ({{ ssh_key_name }})
-              3. Security group           ({{ security_group_name }})
-              4. IAM role + profile       ({{ iam_role_name }})
+              2. EBS data volume          ({{ ebs_data_volume_name }})
+              3. SSH key pair             ({{ ssh_key_name }})
+              4. Security group           ({{ security_group_name }})
+              5. IAM role + profile       ({{ iam_role_name }})
+              6. IAM deployer user        ({{ host_name }}-deployer)
+                 ⚠  This is the LAST step — credentials become invalid after this.
 
             Will NOT delete (app-level - manage from each app's repo):
               - S3 buckets
               - Secrets Manager entries
-              - CloudFront distributions
-              - WAF web ACLs
-
-            EBS data volume survives - delete manually in AWS Console if needed.
+              - CloudFront / CloudWatch
 
             Starting teardown...
 
@@ -89,25 +81,39 @@
   import_playbook: terminate-ec2-instance.yml
 
 # ==============================================================================
-# Step 2: Delete SSH key pair
+# Step 2: Delete EBS data volume
 # ==============================================================================
 
-- name: Step 2 — Delete SSH Key Pair
+- name: Step 2 — Delete EBS Data Volume
+  import_playbook: delete-ebs-volume.yml
+
+# ==============================================================================
+# Step 3: Delete SSH key pair
+# ==============================================================================
+
+- name: Step 3 — Delete SSH Key Pair
   import_playbook: delete-ssh-key.yml
 
 # ==============================================================================
-# Step 3: Delete security group
+# Step 4: Delete security group
 # ==============================================================================
 
-- name: Step 3 — Delete Security Group
+- name: Step 4 — Delete Security Group
   import_playbook: delete-security-group.yml
 
 # ==============================================================================
-# Step 4: Delete IAM role, policies, and instance profile
+# Step 5: Delete IAM role, policies, and instance profile
 # ==============================================================================
 
-- name: Step 4 — Delete IAM Role
+- name: Step 5 — Delete IAM Role
   import_playbook: delete-iam-role.yml
+
+# ==============================================================================
+# Step 6: Delete IAM deployer user (LAST — invalidates current credentials)
+# ==============================================================================
+
+- name: Step 6 — Delete IAM Deployer User
+  import_playbook: delete-iam-deployer-user.yml
 
 # ==============================================================================
 # Final cleanup
@@ -121,14 +127,6 @@
     - ../group_vars/vault.yml
 
   tasks:
-    - name: Remove local instance info files
-      file:
-        path: "{{ item }}"
-        state: absent
-      loop:
-        - "{{ playbook_dir }}/../instance-info.txt"
-      failed_when: false
-
     - name: Remove all instance info files from instances/
       shell: "rm -f {{ playbook_dir }}/../instances/*.txt"
       changed_when: false
@@ -144,15 +142,20 @@
 
             Deleted:
               ✓ EC2 instance:      {{ host_name }}
+              ✓ EBS data volume:   {{ ebs_data_volume_name }}
               ✓ SSH key pair:      {{ ssh_key_name }}
               ✓ Security group:    {{ security_group_name }}
               ✓ IAM role:          {{ iam_role_name }}
               ✓ Instance profile:  {{ iam_instance_profile_name }}
+              ✓ Deployer user:     {{ host_name }}-deployer
 
-            Reminder - delete these manually if no longer needed:
-              - EBS data volume  (AWS Console -> EC2 -> Volumes)
+            ⚠  AWS credentials are now invalid (deployer user deleted).
+               Reconfigure with root/admin credentials before running anything else.
+
+            Reminder — delete these manually if no longer needed:
               - App S3 buckets   (managed by each app)
               - App secrets      (managed by each app)
 
-            To provision a new server:
+            To provision a new server (requires new deployer user first):
+              ansible-playbook playbooks/create-iam-deployer-user.yml
               ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass

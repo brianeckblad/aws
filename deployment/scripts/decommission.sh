@@ -160,6 +160,35 @@ else
     echo -e "  ${YELLOW}–  SSH key pair:${NC}      not found"
 fi
 
+# EBS data volume
+ebs_result=$(aws ec2 describe-volumes \
+    --filters "Name=tag:Name,Values=${host_name}-data" \
+              "Name=tag:Server,Values=${host_name}" \
+    --region "$aws_region" \
+    --query 'Volumes[0].{ID:VolumeId,State:State,Size:Size}' \
+    --output text 2>/dev/null) || ebs_result=""
+
+if [[ -n "$ebs_result" && "$ebs_result" != "None" ]]; then
+    echo -e "  ${GREEN}✓ EBS data volume:${NC}   ${ebs_result}"
+    found_any=true
+else
+    echo -e "  ${YELLOW}–  EBS data volume:${NC}   not found"
+fi
+
+# IAM deployer user
+deployer_result=$(aws iam get-user \
+    --user-name "${host_name}-deployer" \
+    --query 'User.UserName' \
+    --output text 2>/dev/null) || deployer_result=""
+
+if [[ -n "$deployer_result" && "$deployer_result" != "None" ]]; then
+    echo -e "  ${GREEN}✓ IAM deployer user:${NC} ${host_name}-deployer"
+    echo -e "  ${YELLOW}    ⚠  Deleting this user invalidates current AWS credentials.${NC}"
+    found_any=true
+else
+    echo -e "  ${YELLOW}–  IAM deployer user:${NC} not found"
+fi
+
 echo ""
 
 # ── Nothing to do ────────────────────────────────────────────────────

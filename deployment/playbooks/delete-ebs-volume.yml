@@ -1,0 +1,73 @@
+---
+# delete-ebs-volume.yml — Delete the persistent EBS data volume
+# Counterpart to: the data volume created by launch-ec2-instance.yml
+#
+# ⚠  IRREVERSIBLE — all app data on this volume will be lost
+#
+# The data volume survives instance termination by design (ebs_data_delete_on_termination: false).
+# This playbook finds it by tag and permanently deletes it.
+#
+# The EC2 instance must be terminated first (volume must be in 'available' state).
+#
+# Usage: ansible-playbook playbooks/delete-ebs-volume.yml \
+#          --vault-password-file ~/.vault_pass
+
+- name: Delete EBS Data Volume
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+    - name: Find data volume by tag
+      amazon.aws.ec2_vol_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ ebs_data_volume_name }}"
+          "tag:Server": "{{ host_name }}"
+      register: data_volumes
+
+    - name: No data volume found
+      debug:
+        msg: "No EBS data volume found with tag Name={{ ebs_data_volume_name }} — nothing to delete"
+      when: data_volumes.volumes | length == 0
+
+    - name: Show volume(s) found
+      debug:
+        msg:
+          - "Volume: {{ item.id }}"
+          - "  State:  {{ item.status }}"
+          - "  Size:   {{ item.size }} GB"
+          - "  AZ:     {{ item.zone }}"
+      loop: "{{ data_volumes.volumes }}"
+      when: data_volumes.volumes | length > 0
+
+    - name: Fail if volume is still attached (instance not terminated yet)
+      fail:
+        msg: >
+          Volume {{ item.id }} is still 'in-use' — the EC2 instance must be
+          terminated before the data volume can be deleted.
+          Run terminate-ec2-instance.yml first.
+      loop: "{{ data_volumes.volumes }}"
+      when:
+        - data_volumes.volumes | length > 0
+        - item.status == 'in-use'
+
+    - name: Delete data volume
+      amazon.aws.ec2_vol:
+        id: "{{ item.id }}"
+        region: "{{ aws_region }}"
+        state: absent
+      loop: "{{ data_volumes.volumes }}"
+      when:
+        - data_volumes.volumes | length > 0
+        - item.status == 'available'
+
+    - name: Display result
+      debug:
+        msg:
+          - "✓ EBS data volume deleted: {{ ebs_data_volume_name }}"
+          - "  Volume ID(s): {{ data_volumes.volumes | map(attribute='id') | list | join(', ') }}"
+      when: data_volumes.volumes | length > 0
+
