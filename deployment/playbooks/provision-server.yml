@@ -37,6 +37,11 @@
     - ../group_vars/all.yml
     - ../group_vars/vault.yml
   tasks:
+    - name: Detect deployer public IP
+      command: curl -4 -s --max-time 10 ifconfig.me
+      register: deployer_ip_raw
+      changed_when: false
+
     - name: Show what will be provisioned
       debug:
         msg:
@@ -44,17 +49,18 @@
           - "║   Shared Server Provisioning Plan                       ║"
           - "╚══════════════════════════════════════════════════════════╝"
           - ""
-          - "  Server:   {{ host_name }}"
-          - "  Region:   {{ aws_region }}"
-          - "  Type:     {{ ec2_instance_type }}"
-          - "  EBS:      {{ ebs_volume_size }} GB {{ ebs_volume_type }} → {{ apps_root }}"
+          - "  Server:       {{ host_name }}"
+          - "  Region:       {{ aws_region }}"
+          - "  Type:         {{ ec2_instance_type }}"
+          - "  EBS:          {{ ebs_volume_size }} GB {{ ebs_volume_type }} → {{ apps_root }}"
+          - "  Deployer IP:  {{ deployer_ip_raw.stdout | trim }} (SSH restricted to this IP)"
           - ""
           - "  Steps:"
           - "    1. Security group  — {{ security_group_name }}"
           - "    2. IAM role        — {{ iam_role_name }}"
           - "    3. SSH key pair    — {{ ssh_key_name }} → {{ ssh_key_file }}"
           - "    4. EC2 instance    — Name: {{ host_name }}"
-          - "    5. Server harden   — OS, nginx, supervisor, fail2ban, UFW"
+          - "    5. Server harden   — OS, supervisor, fail2ban, UFW, unattended-upgrades"
           - ""
           - "  This server can host multiple apps once provisioned."
 
