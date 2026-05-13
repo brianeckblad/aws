@@ -43,7 +43,7 @@
       - curl
       - git
       - unzip
-      - net-tools
+      - htop
       # Security
       - ufw
       - fail2ban
