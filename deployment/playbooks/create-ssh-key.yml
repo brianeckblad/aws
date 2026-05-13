@@ -1,4 +1,4 @@
----
+a---
 # create-ssh-key.yml — SSH key pair for the shared EC2 server
 #
 # Creates one key pair for the entire server (not per-app).
@@ -61,6 +61,44 @@
         mode: '0400'
         state: file
       when: ssh_key_file_stat.stat.exists or key_pair.changed
+
+cka    - name: Read current server IP from inventory (if a server already exists)
+      shell: >
+        grep 'ansible_host:' {{ playbook_dir }}/../inventories/hosts.yml
+        | awk '{print $2}' | head -1 | tr -d '[:space:]'
+      register: inventory_ip_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Set SSH config HostName fact
+      set_fact:
+        ssh_config_hostname: >-
+          {{ inventory_ip_raw.stdout | trim
+             if (inventory_ip_raw.stdout | trim) not in ['', 'localhost', '127.0.0.1']
+             else '' }}
+
+    - name: Ensure ~/.ssh/config exists with correct permissions
+      file:
+        path: "{{ lookup('env', 'HOME') }}/.ssh/config"
+        state: touch
+        mode: '0600'
+        modification_time: preserve
+        access_time: preserve
+
+    - name: Update ~/.ssh/config — server entry
+      blockinfile:
+        path: "{{ lookup('env', 'HOME') }}/.ssh/config"
+        marker: "# {mark} ANSIBLE MANAGED — {{ host_name }}"
+        block: |
+          Host {{ host_name }}
+          {% if ssh_config_hostname %}
+              HostName {{ ssh_config_hostname }}
+          {% endif %}
+              User {{ admin_user }}
+              IdentityFile {{ ssh_key_file }}
+              IdentitiesOnly yes
+              ServerAliveInterval 60
+              ServerAliveCountMax 10
 
     - name: Get key fingerprint from AWS
       amazon.aws.ec2_key_info:

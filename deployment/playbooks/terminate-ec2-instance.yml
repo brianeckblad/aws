@@ -97,6 +97,20 @@
         dest: "{{ playbook_dir }}/../inventories/hosts.yml"
       failed_when: false
 
+b    - name: Remove HostName from ~/.ssh/config entry (server gone, key still valid)
+      blockinfile:
+        path: "{{ lookup('env', 'HOME') }}/.ssh/config"
+        marker: "# {mark} ANSIBLE MANAGED — {{ host_name }}"
+        block: |
+          Host {{ host_name }}
+              # HostName — not set, server terminated. Re-run launch-ec2-instance.yml.
+              User {{ admin_user }}
+              IdentityFile {{ ssh_key_file }}
+              IdentitiesOnly yes
+              ServerAliveInterval 60
+              ServerAliveCountMax 10
+      failed_when: false
+
     - name: Display result
       debug:
         msg: |

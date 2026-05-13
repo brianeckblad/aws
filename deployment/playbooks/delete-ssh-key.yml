@@ -25,6 +25,14 @@
         path: "{{ ssh_key_file }}"
         state: absent
 
+ening    - name: Remove server entry from ~/.ssh/config
+      blockinfile:
+        path: "{{ lookup('env', 'HOME') }}/.ssh/config"
+        marker: "# {mark} ANSIBLE MANAGED — {{ host_name }}"
+        block: ""
+        state: absent
+      failed_when: false
+
     - name: Display result
       debug:
         msg:

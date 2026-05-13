@@ -245,6 +245,31 @@
       changed_when: false
 
     # -----------------------------------------------------------------
+    # Update ~/.ssh/config with the server's real IP so
+    # "ssh host_name" works immediately after launch
+    # -----------------------------------------------------------------
+    - name: Ensure ~/.ssh/config exists with correct permissions
+      file:
+        path: "{{ lookup('env', 'HOME') }}/.ssh/config"
+        state: touch
+        mode: '0600'
+        modification_time: preserve
+        access_time: preserve
+
+    - name: Update ~/.ssh/config — server entry with live IP
+      blockinfile:
+        path: "{{ lookup('env', 'HOME') }}/.ssh/config"
+        marker: "# {mark} ANSIBLE MANAGED — {{ host_name }}"
+        block: |
+          Host {{ host_name }}
+              HostName {{ instance_ip }}
+              User {{ admin_user }}
+              IdentityFile {{ ssh_key_file }}
+              IdentitiesOnly yes
+              ServerAliveInterval 60
+              ServerAliveCountMax 10
+
+    # -----------------------------------------------------------------
     # Save detailed instance information to a local reference file
     # -----------------------------------------------------------------
     - name: Save instance information file
