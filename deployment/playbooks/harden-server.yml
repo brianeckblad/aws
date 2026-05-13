@@ -2,7 +2,7 @@
 # harden-server.yml — OS hardening and shared service foundation
 #
 # Run ONCE after launch-ec2-instance.yml to harden the OS and install
-# the shared services (nginx, supervisor) that all apps will use.
+# the shared services (supervisor) that all apps will use.
 #
 # This playbook is SERVER-LEVEL only. It does not deploy any application,
 # create nginx vhosts, install SSL certificates, or add supervisor programs.
@@ -16,12 +16,14 @@
 #   - Automatic security updates (unattended-upgrades)
 #   - Kernel parameter hardening (sysctl — IP spoofing, SYN flood, etc.)
 #   - Shared memory hardening (/run/shm noexec,nosuid)
-#   - Fail2ban (nginx attack/rate-limit protection; SSH is key-only)
+#   - Fail2ban (SSH brute-force protection)
 #   - UFW firewall (default deny ingress; allow 22, 80, 443)
 #   - Disable unused services (apache2, avahi-daemon, cups, bluetooth)
-#   - Nginx with hardened global config, default-deny vhost (444)
 #   - Supervisor (shared process manager, empty — apps add their programs)
 #   - System logging (rsyslog + logrotate)
+#
+# NOTE: nginx is NOT installed here. Each app installs and configures nginx
+#       as part of its own deployment (setup.yml in the app repo).
 #
 # Usage:
 #   ansible-playbook playbooks/harden-server.yml \
@@ -45,13 +47,13 @@
       - htop
       - tree
       - jq
+      - net-tools
       # Security
       - ufw
       - fail2ban
       - unattended-upgrades
       - apt-listchanges
-      # Web / process management
-      - nginx
+      # Process management
       - supervisor
       # Python runtime
       - python3
@@ -355,22 +357,10 @@
     # FAIL2BAN — Brute-force protection
     # =========================================================================
 
-    - name: Deploy fail2ban configuration (SSH + nginx)
+    - name: Deploy fail2ban configuration (SSH brute-force protection)
       template:
         src: ../templates/jail.local.j2
         dest: /etc/fail2ban/jail.local
-        owner: root
-        group: root
-        mode: '0644'
-      notify: restart fail2ban
-
-    - name: Install nginx rate-limit filter for fail2ban
-      copy:
-        dest: /etc/fail2ban/filter.d/nginx-limit-req.conf
-        content: |
-          [Definition]
-          failregex = ^\s*\[error\] \d+#\d+: \*\d+ limiting requests, client: <HOST>,
-          ignoreregex =
         owner: root
         group: root
         mode: '0644'
@@ -440,123 +430,6 @@
         - bluetooth
       ignore_errors: yes
 
-    # =========================================================================
-    # NGINX — Shared reverse proxy
-    #
-    # Global config:
-    #   - server_tokens off  (hide nginx version)
-    #   - Conservative timeouts
-    #   - Common security headers
-    #
-    # Default vhost:
-    #   - Returns 444 (close connection) for requests with no matching
-    #     server_name. This prevents hostname probing and drops HTTP requests
-    #     to bare IP addresses.
-    #   - Each app adds its own vhost to sites-available/ and sites-enabled/
-    #     when it is deployed.
-    # =========================================================================
-
-    - name: Install ssl-cert package (provides the snakeoil cert for default vhost)
-      apt:
-        name: ssl-cert
-        state: present
-
-    - name: Write nginx global hardening config
-      copy:
-        dest: /etc/nginx/conf.d/hardening.conf
-        content: |
-          # Global nginx hardening — applied to all vhosts
-          # DO NOT remove; shared by all apps on this server.
-
-          # Hide nginx version from error pages and headers
-          server_tokens off;
-
-          # Default upload limit (apps can override per-vhost)
-          client_max_body_size 25m;
-
-          # Connection timeouts (prevent slow-client attacks)
-          client_body_timeout   12;
-          client_header_timeout 12;
-          keepalive_timeout     15;
-          send_timeout          10;
-
-          # Security headers applied to all responses
-          # Apps can override or extend these in their own vhost blocks.
-          add_header X-Frame-Options        "SAMEORIGIN"                  always;
-          add_header X-Content-Type-Options "nosniff"                     always;
-          add_header X-XSS-Protection       "1; mode=block"               always;
-          add_header Referrer-Policy        "strict-origin-when-cross-origin" always;
-        owner: root
-        group: root
-        mode: '0644'
-      notify: reload nginx
-
-    - name: Write nginx default-deny vhost
-      copy:
-        dest: /etc/nginx/sites-available/default-deny
-        content: |
-          # Default server — silently drop connections for unknown domains.
-          #
-          # Any HTTP/HTTPS request that does not match a deployed app's
-          # server_name block is handled here: the connection is closed
-          # immediately with no response body (nginx return code 444).
-          #
-          # This prevents:
-          #   - Hostname probing / subdomain enumeration
-          #   - IP-direct access to apps
-          #   - Accidental exposure of the nginx default page
-          #
-          # DO NOT remove this file. Each app adds its own vhost alongside
-          # this one in sites-enabled/.
-
-          server {
-              listen 80  default_server;
-              listen [::]:80  default_server;
-              server_name _;
-              return 444;
-          }
-
-          server {
-              listen 443 ssl default_server;
-              listen [::]:443 ssl default_server;
-              server_name _;
-
-              # Self-signed snakeoil cert for the catch-all SSL block.
-              # Deployed apps serve from their own Let's Encrypt certificates.
-              ssl_certificate     /etc/ssl/certs/ssl-cert-snakeoil.pem;
-              ssl_certificate_key /etc/ssl/private/ssl-cert-snakeoil.key;
-
-              return 444;
-          }
-        owner: root
-        group: root
-        mode: '0644'
-      notify: reload nginx
-
-    - name: Enable default-deny vhost
-      file:
-        src: /etc/nginx/sites-available/default-deny
-        dest: /etc/nginx/sites-enabled/default-deny
-        state: link
-      notify: reload nginx
-
-    - name: Remove nginx default page vhost
-      file:
-        path: /etc/nginx/sites-enabled/default
-        state: absent
-      notify: reload nginx
-
-    - name: Test nginx configuration
-      command: nginx -t
-      changed_when: false
-      register: nginx_config_test
-      failed_when: nginx_config_test.rc != 0
-
-    - name: Ensure nginx is started and enabled
-      service:
-        name: nginx
-        state: started
-        enabled: yes
 
     # =========================================================================
     # SUPERVISOR — Shared process manager
@@ -612,11 +485,10 @@
               UFW         - default deny; ports 22, 80, 443 open
               Sysctl      - IP spoofing, SYN flood, redirect mitigations
               Auto-update - unattended security patches enabled
-              Fail2ban    - nginx attack/rate-limit protection active
+              Fail2ban    - SSH brute-force protection active
               /run/shm    - noexec, nosuid
 
             Shared services:
-              nginx      - running, server_tokens off, default-deny vhost active
               supervisor - running, no programs (apps add their own)
               rsyslog    - system logging active
 
@@ -632,7 +504,3 @@
         name: fail2ban
         state: restarted
 
-    - name: reload nginx
-      service:
-        name: nginx
-        state: reloaded
