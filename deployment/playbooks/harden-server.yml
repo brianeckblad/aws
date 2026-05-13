@@ -41,18 +41,13 @@
     system_packages:
       # Core utilities
       - curl
-      - wget
       - git
       - unzip
-      - htop
-      - tree
-      - jq
       - net-tools
       # Security
       - ufw
       - fail2ban
       - unattended-upgrades
-      - apt-listchanges
       # Process management
       - supervisor
       # Python runtime
@@ -62,10 +57,9 @@
       # Logging
       - rsyslog
       - logrotate
-      # Filesystem / EBS tools
+      # Filesystem / EBS tools (XFS for data volume)
       - nvme-cli
       - xfsprogs
-      - e2fsprogs
 
   pre_tasks:
 
