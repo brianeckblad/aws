@@ -25,13 +25,30 @@
         path: "{{ ssh_key_file }}"
         state: absent
 
-ening    - name: Remove server entry from ~/.ssh/config
-      blockinfile:
-        path: "{{ lookup('env', 'HOME') }}/.ssh/config"
-        marker: "# {mark} ANSIBLE MANAGED — {{ host_name }}"
-        block: ""
-        state: absent
+    - name: Remove server entry from ~/.ssh/config
+      environment:
+        SSH_HOST: "{{ host_name }}"
+      shell: |
+        python3 << 'PYEOF'
+        import os, pathlib, re
+        host = os.environ['SSH_HOST']
+
+        config_path = pathlib.Path.home() / '.ssh' / 'config'
+        if not config_path.exists():
+            exit(0)
+        content = config_path.read_text()
+
+        # Remove stale ANSIBLE MANAGED marker lines for this host
+        content = re.sub(rf'(?m)^# (?:BEGIN|END) ANSIBLE MANAGED — {re.escape(host)}\n', '', content)
+        # Remove Host block for this host
+        content = re.sub(rf'(?m)^Host {re.escape(host)}\n(?:[ \t]+[^\n]*\n)*', '', content)
+        content = re.sub(r'\n{3,}', '\n\n', content).strip()
+        config_path.write_text((content + '\n') if content else '')
+        PYEOF
       failed_when: false
+      delegate_to: localhost
+      become: no
+      changed_when: true
 
     - name: Display result
       debug:

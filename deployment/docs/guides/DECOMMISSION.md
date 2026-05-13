@@ -2,7 +2,7 @@
 
 Tear down the server and remove all AWS resources created by this repo.
 
-> ⚠️ **The EBS data volume is NOT deleted automatically** (`ebs_data_delete_on_termination: false`). It survives EC2 termination so app data is preserved. To delete it, do so manually in the AWS Console or CLI after confirming the data is no longer needed.
+> ⚠️ **This is destructive and irreversible.** The EBS data volume **is** deleted by `decommission.yml` (Step 2). Back up any data before running.
 
 ---
 
@@ -12,8 +12,7 @@ Tear down the server and remove all AWS resources created by this repo.
 2. [Full Automated Teardown](#full-automated-teardown)
 3. [Step-by-Step Teardown](#step-by-step-teardown)
 4. [Verify Everything Is Gone](#verify-everything-is-gone)
-5. [Delete the EBS Data Volume (manual)](#delete-the-ebs-data-volume-manual)
-6. [Troubleshooting](#troubleshooting)
+5. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -57,12 +56,14 @@ ansible-playbook playbooks/decommission.yml \
 
 | Step | Playbook | What is removed |
 |------|----------|----------------|
-| 1 | `terminate-ec2-instance.yml` | EC2 instance (EBS root volume deleted; data volume survives) |
-| 2 | `delete-ssh-key.yml` | AWS key pair + `~/.ssh/{host_name}-key.pem` |
-| 3 | `delete-security-group.yml` | Security group (retries if EC2 dependency lingers) |
-| 4 | `delete-iam-role.yml` | Inline policies, managed policies, instance profile, IAM role |
+| 1 | `terminate-ec2-instance.yml` | EC2 instance (EBS root volume deleted on termination) |
+| 2 | `delete-ebs-volume.yml` | EBS data volume (`{host_name}-data`) — **permanent, back up first** |
+| 3 | `delete-ssh-key.yml` | AWS key pair + `~/.ssh/{host_name}-key.pem` + `~/.ssh/config` entry |
+| 4 | `delete-security-group.yml` | Security group (retries if EC2 dependency lingers) |
+| 5 | `delete-iam-role.yml` | Inline policies, managed policies, instance profile, IAM role |
+| 6 | `delete-iam-deployer-user.yml` | IAM deployer user (only if `-e delete_deployer_user=true` is passed) |
 
-**Duration:** 3–5 minutes
+**Duration:** 4–6 minutes
 
 ---
 
@@ -104,7 +105,39 @@ aws ec2 describe-instances \
 
 ---
 
-### Step 2: Delete SSH key pair
+### Step 2: Delete EBS data volume
+
+> ⚠️ **This permanently deletes all app data on the volume.** Back up anything you need first.
+
+```bash
+ansible-playbook playbooks/delete-ebs-volume.yml --vault-password-file ~/.vault_pass
+```
+
+Or with AWS CLI:
+
+```bash
+VOL_ID=$(aws ec2 describe-volumes \
+  --filters "Name=tag:Name,Values=${host_name}-data" \
+  --query 'Volumes[0].VolumeId' \
+  --output text)
+
+aws ec2 delete-volume --volume-id $VOL_ID
+echo "✓ EBS data volume deleted"
+```
+
+Verify:
+
+```bash
+aws ec2 describe-volumes \
+  --filters "Name=tag:Name,Values=${host_name}-data" \
+  --query 'Volumes[].[VolumeId,State]' \
+  --output table
+# Should return no results
+```
+
+---
+
+### Step 3: Delete SSH key pair
 
 ```bash
 ansible-playbook playbooks/delete-ssh-key.yml --vault-password-file ~/.vault_pass
@@ -127,7 +160,7 @@ aws ec2 describe-key-pairs --key-names ${host_name}-key 2>&1
 
 ---
 
-### Step 3: Delete security group
+### Step 4: Delete security group
 
 > If you see `DependencyViolation`, wait 30–60 seconds for the EC2 network interfaces to fully release and retry.
 
@@ -151,7 +184,7 @@ aws ec2 describe-security-groups --group-names ${host_name}-sg 2>&1
 
 ---
 
-### Step 4: Delete IAM role
+### Step 5: Delete IAM role
 
 An IAM role cannot be deleted until all inline policies are removed, all managed policies are detached, and all instance profiles are detached and deleted. The playbook handles all of this automatically.
 
@@ -201,6 +234,29 @@ aws iam get-role --role-name ${host_name}-ec2-role 2>&1
 
 ---
 
+### Step 6: Delete IAM deployer user (optional)
+
+> ⚠️ **Deleting the deployer user immediately invalidates the AWS credentials you are using.** Do this last.
+
+By default the deployer user is **kept** so your credentials remain valid. Pass `-e delete_deployer_user=true` to also remove it:
+
+```bash
+ansible-playbook playbooks/delete-iam-deployer-user.yml \
+  --vault-password-file ~/.vault_pass \
+  -e delete_deployer_user=true
+```
+
+Or run the full decommission with the flag:
+
+```bash
+ansible-playbook playbooks/decommission.yml \
+  --vault-password-file ~/.vault_pass \
+  -e decommission_confirmed=true \
+  -e delete_deployer_user=true
+```
+
+---
+
 ## Verify Everything Is Gone
 
 ```bash
@@ -210,6 +266,12 @@ echo "=== EC2 Instance ==="
 aws ec2 describe-instances \
   --filters "Name=tag:Name,Values=${host_name}" \
   --query 'Reservations[].Instances[].[InstanceId,State.Name]' \
+  --output table
+
+echo "=== EBS Data Volume ==="
+aws ec2 describe-volumes \
+  --filters "Name=tag:Name,Values=${host_name}-data" \
+  --query 'Volumes[].[VolumeId,State]' \
   --output table
 
 echo "=== SSH Key Pair ==="
@@ -223,28 +285,12 @@ aws iam get-role --role-name ${host_name}-ec2-role 2>&1 | head -3
 
 echo "=== Instance Profile ==="
 aws iam get-instance-profile --instance-profile-name ${host_name}-instance-profile 2>&1 | head -3
+
+echo "=== IAM Deployer User ==="
+aws iam get-user --user-name ${host_name}-deployer 2>&1 | head -3
 ```
 
-**Expected:** Every check returns "does not exist", "NoSuchEntity", or "terminated".
-
----
-
-## Delete the EBS Data Volume (manual)
-
-The data EBS volume is kept after EC2 termination by design. When you are sure the data is no longer needed:
-
-```bash
-# List unattached volumes tagged for this server
-aws ec2 describe-volumes \
-  --filters "Name=tag:Name,Values=${host_name}-data" \
-            "Name=status,Values=available" \
-  --query 'Volumes[].[VolumeId,Size,State]' \
-  --output table
-
-# Delete (PERMANENT — no undo)
-aws ec2 delete-volume --volume-id vol-XXXXXXXXXXXXXXXXX
-echo "✓ EBS data volume deleted"
-```
+**Expected:** Every check returns "does not exist", "NoSuchEntity", "NoSuchEntityException", or "terminated" / no results.
 
 ---
 
@@ -257,6 +303,7 @@ echo "✓ EBS data volume deleted"
 | `NoSuchEntity` errors | Resource was already deleted — not an error |
 | `InvalidKeyPair.NotFound` | Key pair already deleted — not an error |
 | EBS volume still shows "in-use" after EC2 terminated | Wait a few minutes; volume detachment lags termination |
+| `delete-ebs-volume.yml` says volume not found | Volume was already deleted or never created — not an error |
 
 ---
 

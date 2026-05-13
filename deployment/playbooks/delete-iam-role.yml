@@ -43,13 +43,13 @@
       failed_when: false
       changed_when: false
 
-    - name: "Step 3/4 — Delete instance profile"
+    - name: "Step 3a/4 — Delete instance profile"
       amazon.aws.iam_instance_profile:
         name: "{{ iam_instance_profile_name }}"
         state: absent
       failed_when: false
 
-    - name: "Step 3/4 — Find any remaining instance profiles attached to role"
+    - name: "Step 3b/4 — Find any remaining instance profiles attached to role"
       command: >
         aws iam list-instance-profiles-for-role
         --role-name {{ iam_role_name }}
@@ -59,7 +59,7 @@
       failed_when: false
       changed_when: false
 
-    - name: "Step 3/4 — Remove and delete stale instance profiles"
+    - name: "Step 3c/4 — Remove and delete stale instance profiles"
       shell: |
         aws iam remove-role-from-instance-profile \
           --instance-profile-name {{ item }} \

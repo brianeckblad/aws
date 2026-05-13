@@ -208,29 +208,31 @@
 
     - name: Display IAM role summary
       debug:
-        msg: |
-
-          ✓ IAM Role:         {{ iam_role_name }}
-            Account:          {{ aws_account_id }}
-            Instance Profile: {{ iam_instance_profile_name }}
-
-            Policies (least-privilege):
-              {{ iam_policy_s3 }}
-                S3 objects:   arn:aws:s3:::{{ host_name }}-*/*
-                S3 buckets:   arn:aws:s3:::{{ host_name }}-*
-
-              {{ iam_policy_secrets }}
-                Secrets:      arn:aws:secretsmanager:...:secret:{{ host_name }}/*
-                              (apps should namespace as {{ host_name }}/{app_name}/...)
-
-              {{ iam_policy_cloudwatch }}
-                Metrics:      resource:* (AWS requirement)
-                Logs:         /{{ host_name }}/* log groups
-
-              {{ iam_policy_sns }}
-                Topics:       arn:aws:sns:{{ aws_region }}:{{ aws_account_id }}:{{ host_name }}-*
-
-              {{ iam_policy_serial_console }}
-                Instances:    arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:instance/*
-
-              SSM:            AmazonSSMManagedInstanceCore (AWS managed)
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ✓ IAM Role Created - {{ host_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  Role:             {{ iam_role_name }}"
+          - "  Account:          {{ aws_account_id }}"
+          - "  Instance Profile: {{ iam_instance_profile_name }}"
+          - ""
+          - "  Policies (least-privilege):"
+          - "    {{ iam_policy_s3 }}"
+          - "      S3 objects:  arn:aws:s3:::{{ host_name }}-*/*"
+          - "      S3 buckets:  arn:aws:s3:::{{ host_name }}-*"
+          - ""
+          - "    {{ iam_policy_secrets }}"
+          - "      Secrets:     arn:aws:secretsmanager:...:secret:{{ host_name }}/*"
+          - ""
+          - "    {{ iam_policy_cloudwatch }}"
+          - "      Metrics:     resource:* (AWS requirement for PutMetricData)"
+          - "      Logs:        /{{ host_name }}/* log groups"
+          - ""
+          - "    {{ iam_policy_sns }}"
+          - "      Topics:      arn:aws:sns:{{ aws_region }}:{{ aws_account_id }}:{{ host_name }}-*"
+          - ""
+          - "    {{ iam_policy_serial_console }}"
+          - "      Instances:   arn:aws:ec2:{{ aws_region }}:{{ aws_account_id }}:instance/*"
+          - ""
+          - "    AmazonSSMManagedInstanceCore (AWS managed — SSM Session Manager)"

@@ -29,11 +29,11 @@
 
 ```
 Layer 1 — Server Foundation (this repo)
-  EC2 instance + OS hardening + nginx + supervisor + fail2ban + UFW
+  EC2 instance + OS hardening + supervisor + fail2ban + UFW
   All resources named after host_name
 
 Layer 2 — Application Deployment (each app's own repo)
-  nginx vhost, SSL cert, supervisor program, Python venv, app code
+  Reverse proxy, SSL cert, supervisor program, Python venv, app code
   Resources named after app_name; paths under /opt/apps/{app_name}
 ```
 
@@ -53,9 +53,11 @@ Provision:
   └── harden-server.yml
 
 Decommission:
-  decommission.yml              ← master (runs all 4 below in order)
+  decommission.yml              ← master (runs all 6 below in order)
   ├── terminate-ec2-instance.yml
+  ├── delete-ebs-volume.yml
   ├── delete-ssh-key.yml
   ├── delete-security-group.yml
-  └── delete-iam-role.yml
+  ├── delete-iam-role.yml
+  └── delete-iam-deployer-user.yml  ← skipped unless -e delete_deployer_user=true
 ```

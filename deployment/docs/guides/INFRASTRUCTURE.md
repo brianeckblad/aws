@@ -23,14 +23,14 @@ AWS resources created by this repo — what they are, why they exist, and how th
 ## EC2 Instance
 
 **OS:** Ubuntu 24.04 LTS  
-**Default type:** `t3.micro` (configurable via `ec2_instance_type`)  
+**Default type:** `t3.small` (configurable via `ec2_instance_type`)  
 **AMI:** Latest Ubuntu 24.04 LTS in the specified region (resolved at deploy time)
 
-### Why t3.micro?
+### Why t3.small?
 
 Nitro-based instance types (t3, t3a, m5, c5, r5, and later families) expose EBS volumes as NVMe devices (`/dev/nvme1n1`). The EBS mount logic in `harden-server.yml` expects NVMe paths. If you switch to an older type (t2, m4), update `ebs_nvme_device` in vault.yml to match the actual device path.
 
-`t3.micro` works for light loads and development. Upgrade to `t3.small` or larger for 2–4 production apps. Resize by changing `ec2_instance_type` in vault and launching a new instance (or resizing via the console — no playbook change needed).
+`t3.small` handles light loads and 1–2 apps comfortably. Upgrade to `t3.medium` or larger for heavier workloads. Resize by changing `ec2_instance_type` in vault and launching a new instance (or resizing via the console — no playbook change needed).
 
 ### Tags
 
@@ -56,12 +56,12 @@ ManagedBy: ansible
 | Port | Protocol | Source | Purpose |
 |------|----------|--------|---------|
 | 22 | TCP | `0.0.0.0/0` | SSH for deployment |
-| 80 | TCP | `0.0.0.0/0` | HTTP (nginx redirects to HTTPS) |
+| 80 | TCP | `0.0.0.0/0` | HTTP |
 | 443 | TCP | `0.0.0.0/0` | HTTPS |
 
 **Egress:** All traffic allowed (required for apt updates and Let's Encrypt)
 
-> SSH is open to the internet because deployments run from anywhere. The effective SSH lockdown is on the host — public key only, no passwords, fail2ban bans after 3 failed attempts.
+> SSH is open to the internet because deployments run from anywhere. The effective SSH lockdown is on the host — public key only, no passwords, fail2ban bans after 5 failed attempts.
 
 **Defense-in-depth:** UFW on the host enforces the same three ports at the OS level, independent of the AWS SG. An attacker who somehow bypassed the SG would still be blocked by UFW.
 
@@ -114,10 +114,10 @@ To add additional operators, add their public keys to `~ubuntu/.ssh/authorized_k
 | Setting | Value |
 |---------|-------|
 | Type | gp3 |
-| Size | 20 GB (Ubuntu default) |
+| Size | 8 GB |
 | Deleted on termination | Yes |
 
-The root volume holds the OS, packages, nginx config, supervisor config, and SSL certificates. These are all managed by Ansible and can be recreated from playbooks — no persistent data lives here.
+The root volume holds the OS, packages, supervisor config, and SSL certificates. These are all managed by Ansible and can be recreated from playbooks — no persistent data lives here.
 
 ### Data volume (app data)
 

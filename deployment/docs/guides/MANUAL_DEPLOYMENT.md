@@ -57,8 +57,8 @@ ansible-playbook playbooks/create-security-group.yml --vault-password-file ~/.va
    | Type | Protocol | Port | Source | Description |
    |------|----------|------|--------|-------------|
    | SSH | TCP | 22 | 0.0.0.0/0 | SSH — server administration |
-   | HTTP | TCP | 80 | 0.0.0.0/0 | HTTP — nginx (redirect to HTTPS) |
-   | HTTPS | TCP | 443 | 0.0.0.0/0 | HTTPS — nginx (TLS termination) |
+   | HTTP | TCP | 80 | 0.0.0.0/0 | HTTP |
+   | HTTPS | TCP | 443 | 0.0.0.0/0 | HTTPS |
 
 6. Under **Outbound rules:** leave the default (all traffic allowed)
 7. Add **Tags:**
@@ -653,11 +653,12 @@ sudo apt update && sudo apt dist-upgrade -y
 **5b. Install server packages:**
 ```bash
 sudo apt install -y \
-  python3 python3-pip python3-venv python3-dev build-essential \
-  nginx supervisor certbot python3-certbot-nginx \
-  fail2ban ufw ssl-cert git curl net-tools \
-  xfsprogs rsyslog logrotate unattended-upgrades apt-listchanges \
-  libjpeg-dev zlib1g-dev libpng-dev
+  curl git unzip htop net-tools \
+  ufw fail2ban unattended-upgrades \
+  supervisor \
+  python3 python3-pip python3-venv \
+  rsyslog logrotate \
+  nvme-cli xfsprogs
 ```
 
 **5c. Format and mount the EBS data volume:**
@@ -753,14 +754,15 @@ sudo tee /etc/fail2ban/jail.local > /dev/null << 'EOF'
 [DEFAULT]
 bantime  = 86400
 findtime = 1200
-maxretry = 3
+maxretry = 5
+banaction = iptables-multiport
 
 [sshd]
 enabled = true
 port    = ssh
 
-[nginx-http-auth]
-enabled = true
+[recidive]
+enabled = false
 EOF
 
 sudo systemctl enable fail2ban
@@ -786,47 +788,17 @@ for svc in apache2 avahi-daemon cups bluetooth; do
 done
 ```
 
-**5k. Configure nginx with default-deny vhost:**
-```bash
-# Disable server version header
-sudo sed -i 's/# server_tokens off;/server_tokens off;/' /etc/nginx/nginx.conf
-
-# Add global security headers to http {} block
-sudo tee /etc/nginx/conf.d/security-headers.conf > /dev/null << 'EOF'
-add_header X-Frame-Options "SAMEORIGIN" always;
-add_header X-Content-Type-Options "nosniff" always;
-add_header X-XSS-Protection "1; mode=block" always;
-add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-EOF
-
-# Create default-deny vhost (drops requests with no matching server_name)
-sudo tee /etc/nginx/sites-available/default-deny > /dev/null << 'EOF'
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    return 444;
-}
-EOF
-
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo ln -sf /etc/nginx/sites-available/default-deny /etc/nginx/sites-enabled/default-deny
-
-sudo nginx -t && sudo systemctl enable nginx && sudo systemctl restart nginx
-```
-
-**5l. Configure supervisor:**
+**5k. Configure supervisor:**
 ```bash
 sudo systemctl enable supervisor
 sudo systemctl start supervisor
 ```
 
-**5m. Verify the server is ready:**
+**5l. Verify the server is ready:**
 ```bash
-sudo systemctl is-active nginx supervisor fail2ban unattended-upgrades
+sudo systemctl is-active supervisor fail2ban unattended-upgrades
 sudo ufw status
 df -h /opt/apps
-curl -sv http://localhost 2>&1 | grep -E "< HTTP|Empty reply"
-# Empty reply = default-deny vhost is working
 ```
 
 ---
@@ -865,7 +837,7 @@ echo ""
 echo "=== Server Health ==="
 ssh -i "$KEY_FILE" ubuntu@$IP bash << 'REMOTE'
 echo "Services:"
-systemctl is-active nginx supervisor fail2ban unattended-upgrades ufw
+systemctl is-active supervisor fail2ban unattended-upgrades ufw
 
 echo ""
 echo "EBS mount:"
@@ -878,10 +850,6 @@ sudo ufw status verbose | head -10
 echo ""
 echo "SSH hardening:"
 sudo grep -E "^PasswordAuthentication|^PermitRootLogin|^MaxAuthTries" /etc/ssh/sshd_config
-
-echo ""
-echo "Default-deny vhost:"
-curl -sv http://localhost 2>&1 | grep -E "Empty reply|< HTTP"
 REMOTE
 ```
 

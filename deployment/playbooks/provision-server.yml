@@ -13,11 +13,10 @@
 #   2. IAM role         — host_name-ec2-role  (S3, Secrets Manager, CloudWatch, SSM)
 #   3. SSH key pair     — host_name-key  (saved to ~/.ssh/)
 #   4. EC2 instance     — tagged Name=host_name, EBS at apps_root
-#   5. Server hardening — OS hardening, nginx, supervisor, fail2ban, UFW
+#   5. Server hardening — OS hardening, supervisor, fail2ban, UFW
 #
 # What this does NOT do (app-level concerns):
 #   - Deploy any application code
-#   - Create nginx vhosts
 #   - Install SSL certificates
 #   - Create app virtualenvs or supervisor programs
 #   - Create S3 buckets or Secrets Manager entries

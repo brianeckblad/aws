@@ -97,29 +97,59 @@
         dest: "{{ playbook_dir }}/../inventories/hosts.yml"
       failed_when: false
 
-b    - name: Remove HostName from ~/.ssh/config entry (server gone, key still valid)
-      blockinfile:
-        path: "{{ lookup('env', 'HOME') }}/.ssh/config"
-        marker: "# {mark} ANSIBLE MANAGED — {{ host_name }}"
-        block: |
-          Host {{ host_name }}
-              # HostName — not set, server terminated. Re-run launch-ec2-instance.yml.
-              User {{ admin_user }}
-              IdentityFile {{ ssh_key_file }}
-              IdentitiesOnly yes
-              ServerAliveInterval 60
-              ServerAliveCountMax 10
+    - name: Remove HostName from ~/.ssh/config entry (server gone, key still valid)
+      environment:
+        SSH_HOST: "{{ host_name }}"
+        SSH_USER: "{{ admin_user }}"
+        SSH_KEYFILE: "{{ ssh_key_file }}"
+      shell: |
+        python3 << 'PYEOF'
+        import os, pathlib, re
+        host    = os.environ['SSH_HOST']
+        user    = os.environ['SSH_USER']
+        keyfile = os.environ['SSH_KEYFILE']
+
+        config_path = pathlib.Path.home() / '.ssh' / 'config'
+        if not config_path.exists():
+            exit(0)
+        content = config_path.read_text()
+
+        # Remove stale ANSIBLE MANAGED marker lines for this host
+        content = re.sub(rf'(?m)^# (?:BEGIN|END) ANSIBLE MANAGED — {re.escape(host)}\n', '', content)
+        # Remove existing Host block for this host
+        content = re.sub(rf'(?m)^Host {re.escape(host)}\n(?:[ \t]+[^\n]*\n)*', '', content)
+        content = re.sub(r'\n{3,}', '\n\n', content).strip()
+
+        # Re-add entry without HostName (server terminated, key still valid)
+        new_block = (
+            f'Host {host}\n'
+            f'    # HostName not set — server terminated, run launch-ec2-instance.yml\n'
+            f'    User {user}\n'
+            f'    IdentityFile {keyfile}\n'
+            f'    IdentitiesOnly yes\n'
+            f'    ServerAliveInterval 60\n'
+            f'    ServerAliveCountMax 10\n'
+        )
+        content = (content + '\n\n' + new_block) if content else new_block
+        config_path.write_text(content)
+        PYEOF
       failed_when: false
+      delegate_to: localhost
+      become: no
+      changed_when: true
 
     - name: Display result
       debug:
-        msg: |
-
-          ✓ EC2 instance terminated: {{ host_name }}
-          ✓ Inventory reset to localhost placeholder
-
-            Note: EBS data volume survives - reattach to new instance if needed.
-
-            To provision a new server:
-              ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ✓ EC2 Instance Terminated - {{ host_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  ✓ Instance terminated"
+          - "  ✓ Inventory reset to localhost placeholder"
+          - ""
+          - "  Note: EBS data volume survives — reattach to a new instance if needed."
+          - ""
+          - "  To provision a new server:"
+          - "    ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass"
       when: ec2_instances.instances | length > 0

@@ -6,8 +6,8 @@
 #
 # Inbound:
 #   22  — SSH (admin access; restrict to known IPs in production)
-#   80  — HTTP  (nginx → apps, redirect to HTTPS)
-#   443 — HTTPS (nginx → apps, TLS termination)
+#   80  — HTTP  (web traffic)
+#   443 — HTTPS (web traffic, TLS)
 #
 # Outbound: all traffic (package updates, AWS API, external services)
 #
@@ -76,19 +76,19 @@
             cidr_ip: "{{ ssh_cidr }}"
             rule_desc: "SSH - restricted to {{ ssh_cidr }}"
 
-          # HTTP — nginx receives and redirects to HTTPS
+          # HTTP
           - proto: tcp
             from_port: 80
             to_port: 80
             cidr_ip: 0.0.0.0/0
-            rule_desc: "HTTP - nginx (redirect to HTTPS)"
+            rule_desc: "HTTP"
 
-          # HTTPS — nginx handles TLS, proxies to app processes
+          # HTTPS
           - proto: tcp
             from_port: 443
             to_port: 443
             cidr_ip: 0.0.0.0/0
-            rule_desc: "HTTPS - nginx (TLS termination, proxy to apps)"
+            rule_desc: "HTTPS"
 
         tags:
           Name: "{{ security_group_name }}"
@@ -99,19 +99,22 @@
 
     - name: Display security group summary
       debug:
-        msg: |
-
-          ✓ Security Group: {{ security_group_name }}
-            Region: {{ aws_region }}
-
-            Inbound:
-              22  (TCP) - SSH   from {{ ssh_cidr }}
-              80  (TCP) - HTTP  from 0.0.0.0/0
-              443 (TCP) - HTTPS from 0.0.0.0/0
-
-            Outbound: all traffic allowed
-
-            ℹ  SSH is locked to {{ ssh_cidr }}.
-               To allow a different IP, set ssh_allowed_cidr in vault.yml
-               and re-run this playbook, or update the rule in the AWS Console.
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ✓ Security Group Created - {{ host_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  Group:  {{ security_group_name }}"
+          - "  Region: {{ aws_region }}"
+          - ""
+          - "  Inbound:"
+          - "    22  (TCP) — SSH   from {{ ssh_cidr }}"
+          - "    80  (TCP) — HTTP  from 0.0.0.0/0"
+          - "    443 (TCP) — HTTPS from 0.0.0.0/0"
+          - ""
+          - "  Outbound: all traffic allowed"
+          - ""
+          - "  ℹ  SSH is locked to {{ ssh_cidr }}."
+          - "     To allow a different IP, set ssh_allowed_cidr in vault.yml"
+          - "     and re-run this playbook, or update the rule in the AWS Console."
 

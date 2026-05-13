@@ -1,4 +1,4 @@
-a---
+---
 # create-ssh-key.yml — SSH key pair for the shared EC2 server
 #
 # Creates one key pair for the entire server (not per-app).
@@ -62,7 +62,7 @@ a---
         state: file
       when: ssh_key_file_stat.stat.exists or key_pair.changed
 
-cka    - name: Read current server IP from inventory (if a server already exists)
+    - name: Read current server IP from inventory (if a server already exists)
       shell: >
         grep 'ansible_host:' {{ playbook_dir }}/../inventories/hosts.yml
         | awk '{print $2}' | head -1 | tr -d '[:space:]'
@@ -86,19 +86,47 @@ cka    - name: Read current server IP from inventory (if a server already exists
         access_time: preserve
 
     - name: Update ~/.ssh/config — server entry
-      blockinfile:
-        path: "{{ lookup('env', 'HOME') }}/.ssh/config"
-        marker: "# {mark} ANSIBLE MANAGED — {{ host_name }}"
-        block: |
-          Host {{ host_name }}
-          {% if ssh_config_hostname %}
-              HostName {{ ssh_config_hostname }}
-          {% endif %}
-              User {{ admin_user }}
-              IdentityFile {{ ssh_key_file }}
-              IdentitiesOnly yes
-              ServerAliveInterval 60
-              ServerAliveCountMax 10
+      environment:
+        SSH_HOST: "{{ host_name }}"
+        SSH_HOSTNAME: "{{ ssh_config_hostname }}"
+        SSH_USER: "{{ admin_user }}"
+        SSH_KEYFILE: "{{ ssh_key_file }}"
+      shell: |
+        python3 << 'PYEOF'
+        import os, pathlib, re
+        host     = os.environ['SSH_HOST']
+        hostname = os.environ.get('SSH_HOSTNAME', '').strip()
+        user     = os.environ['SSH_USER']
+        keyfile  = os.environ['SSH_KEYFILE']
+
+        config_path = pathlib.Path.home() / '.ssh' / 'config'
+        config_path.parent.mkdir(mode=0o700, exist_ok=True)
+        config_path.touch(mode=0o600, exist_ok=True)
+        content = config_path.read_text()
+
+        # Remove stale ANSIBLE MANAGED marker lines for this host
+        content = re.sub(rf'(?m)^# (?:BEGIN|END) ANSIBLE MANAGED — {re.escape(host)}\n', '', content)
+        # Remove existing Host block for this host
+        content = re.sub(rf'(?m)^Host {re.escape(host)}\n(?:[ \t]+[^\n]*\n)*', '', content)
+        content = re.sub(r'\n{3,}', '\n\n', content).strip()
+
+        lines = [f'Host {host}']
+        if hostname:
+            lines.append(f'    HostName {hostname}')
+        lines += [
+            f'    User {user}',
+            f'    IdentityFile {keyfile}',
+            f'    IdentitiesOnly yes',
+            f'    ServerAliveInterval 60',
+            f'    ServerAliveCountMax 10',
+        ]
+        new_block = '\n'.join(lines) + '\n'
+        content = (content + '\n\n' + new_block) if content else new_block
+        config_path.write_text(content)
+        PYEOF
+      delegate_to: localhost
+      become: no
+      changed_when: true
 
     - name: Get key fingerprint from AWS
       amazon.aws.ec2_key_info:
@@ -109,14 +137,17 @@ cka    - name: Read current server IP from inventory (if a server already exists
 
     - name: Display SSH key summary
       debug:
-        msg: |
-
-          ✓ SSH Key: {{ ssh_key_name }}
-            Fingerprint: {{ key_info.keys[0].key_fingerprint | default('N/A') }}
-            Local file:  {{ ssh_key_file }}  (mode 0400)
-
-            SSH access:
-              ssh -i {{ ssh_key_file }} ubuntu@<SERVER_IP>
-
-            ⚠  Keep this key safe - there is no recovery without it
-               (unless AWS Systems Manager Session Manager is configured)
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ✓ SSH Key Created - {{ host_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  Key pair:   {{ ssh_key_name }}"
+          - "  Fingerprint: {{ key_info.keys[0].key_fingerprint | default('N/A') }}"
+          - "  Local file:  {{ ssh_key_file }}  (mode 0400)"
+          - ""
+          - "  SSH access:"
+          - "    ssh -i {{ ssh_key_file }} ubuntu@<SERVER_IP>"
+          - ""
+          - "  ⚠  Keep this key safe — there is no recovery without it"
+          - "     (unless AWS Systems Manager Session Manager is configured)"

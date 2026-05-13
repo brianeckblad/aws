@@ -2,7 +2,7 @@
 
 **Ansible automation for provisioning, hardening, and managing shared EC2 servers on AWS.**
 
-This repo handles server infrastructure only. Application deployments (nginx vhosts, SSL certificates, supervisor programs, S3 buckets, Secrets Manager entries) are managed from each app's own repo.
+This repo handles server infrastructure only. Application deployments (SSL certificates, supervisor programs, S3 buckets, Secrets Manager entries) are managed from each app's own repo.
 
 ---
 
@@ -10,7 +10,6 @@ This repo handles server infrastructure only. Application deployments (nginx vho
 
 ```
 EC2 (shared server — Ubuntu 24.04 LTS)
-├── nginx          shared reverse proxy, default-deny vhost
 ├── supervisor     shared process manager
 ├── fail2ban       brute-force protection
 ├── UFW            firewall (default deny; 22/80/443 open)
@@ -60,7 +59,7 @@ Full guide: [deployment/docs/guides/QUICKSTART.md](deployment/docs/guides/QUICKS
 | `create-iam-role.yml` | IAM role + instance profile |
 | `create-ssh-key.yml` | SSH key pair → `~/.ssh/` |
 | `launch-ec2-instance.yml` | EC2 instance + EBS data volume |
-| `harden-server.yml` | OS hardening, nginx, supervisor, fail2ban, UFW |
+| `harden-server.yml` | OS hardening, supervisor, fail2ban, UFW |
 
 ### Maintain
 | Playbook | Purpose |
@@ -72,9 +71,11 @@ Full guide: [deployment/docs/guides/QUICKSTART.md](deployment/docs/guides/QUICKS
 |---|---|
 | `decommission.yml` | Master — removes all server AWS resources |
 | `terminate-ec2-instance.yml` | Terminate the EC2 instance |
+| `delete-ebs-volume.yml` | Delete the EBS data volume |
 | `delete-ssh-key.yml` | Delete SSH key from AWS + local |
 | `delete-security-group.yml` | Delete the security group |
 | `delete-iam-role.yml` | Delete the IAM role + instance profile |
+| `delete-iam-deployer-user.yml` | Delete the IAM deployer user (optional — pass `-e delete_deployer_user=true`) |
 
 ---
 
@@ -107,7 +108,7 @@ aws/
     │   └── vault.yml.example Template — copy and fill in
     ├── inventories/
     │   └── hosts.yml         Auto-generated with server IP on deploy
-    ├── templates/            Jinja2 templates (nginx, fail2ban, logrotate, etc.)
+    ├── templates/            Jinja2 templates (fail2ban, logrotate, etc.)
     ├── scripts/
     │   ├── load-vars.sh      Source to load vault vars into shell
     │   ├── local-dev-setup.sh Setup/merge local config files
@@ -122,7 +123,7 @@ aws/
 One server hosts multiple applications. After provisioning, each app deploys itself from its own repo using its own `setup.yml`. Each app needs a unique:
 
 - `app_name` — drives all paths (`/opt/apps/{app_name}`), log dir, supervisor service
-- `server_name` — FQDN for nginx vhost + SSL cert (must resolve to this server's IP)
+- `server_name` — FQDN (must resolve to this server's IP)
 - `gunicorn_port` — unique loopback port per app (8000, 8001, 8002 …)
 
 ---

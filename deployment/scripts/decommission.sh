@@ -183,10 +183,9 @@ deployer_result=$(aws iam get-user \
 
 if [[ -n "$deployer_result" && "$deployer_result" != "None" ]]; then
     echo -e "  ${GREEN}✓ IAM deployer user:${NC} ${host_name}-deployer"
-    echo -e "  ${YELLOW}    ⚠  Deleting this user invalidates current AWS credentials.${NC}"
     found_any=true
 else
-    echo -e "  ${YELLOW}–  IAM deployer user:${NC} not found"
+    echo -e "  ${YELLOW}–  IAM deployer user:${NC} not found (may have been deleted or not yet created)"
 fi
 
 echo ""
@@ -215,6 +214,30 @@ if [[ "$confirm" != "$host_name" ]]; then
     exit 1
 fi
 
+# ── Ask about IAM deployer user credentials (always ask) ─────────────
+echo ""
+echo "  ┌─────────────────────────────────────────────────────────┐"
+echo "  │  IAM Deployer User: ${host_name}-deployer"
+echo "  │"
+if [[ -n "$deployer_result" && "$deployer_result" != "None" ]]; then
+    echo "  │  ⚠  This user exists. Deleting it will permanently"
+    echo "  │     invalidate your current AWS credentials."
+else
+    echo "  │  The user was not found — it may have already been"
+    echo "  │  deleted or was never created."
+fi
+echo "  └─────────────────────────────────────────────────────────┘"
+printf "  Also delete the IAM deployer user and credentials? [y/N]: "
+read -r delete_deployer_answer
+
+delete_deployer_user=false
+if [[ "$delete_deployer_answer" =~ ^[Yy]$ ]]; then
+    delete_deployer_user=true
+    echo -e "  ${RED}→ IAM deployer user WILL be deleted.${NC}"
+else
+    echo -e "  ${GREEN}→ IAM deployer user will be KEPT (skipped).${NC}"
+fi
+
 echo ""
 echo "Starting decommission..."
 echo ""
@@ -223,5 +246,6 @@ echo ""
 cd "$DEPLOYMENT_DIR"
 ansible-playbook playbooks/decommission.yml \
     --vault-password-file ~/.vault_pass \
-    -e "decommission_confirmed=true"
+    -e "decommission_confirmed=true" \
+    -e "delete_deployer_user=${delete_deployer_user}"
 

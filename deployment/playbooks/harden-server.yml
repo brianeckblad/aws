@@ -5,7 +5,7 @@
 # the shared services (supervisor) that all apps will use.
 #
 # This playbook is SERVER-LEVEL only. It does not deploy any application,
-# create nginx vhosts, install SSL certificates, or add supervisor programs.
+# install SSL certificates, or add supervisor programs.
 # Those are app-level concerns handled by each app's own setup.yml.
 #
 # What this does:
@@ -21,9 +21,6 @@
 #   - Disable unused services (apache2, avahi-daemon, cups, bluetooth)
 #   - Supervisor (shared process manager, empty — apps add their programs)
 #   - System logging (rsyslog + logrotate)
-#
-# NOTE: nginx is NOT installed here. Each app installs and configures nginx
-#       as part of its own deployment (setup.yml in the app repo).
 #
 # Usage:
 #   ansible-playbook playbooks/harden-server.yml \
@@ -75,6 +72,7 @@
         delay: 10
         sleep: 15
         timeout: 600
+      become: no
       register: wait_result
 
     - name: Gather facts (after connection is confirmed)
@@ -460,9 +458,9 @@
       ansible.builtin.reboot:
         msg: "Rebooting after initial server hardening"
         pre_reboot_delay: 5
-        post_reboot_delay: 15
-        reboot_timeout: 300
-        connect_timeout: 20
+        post_reboot_delay: 30
+        reboot_timeout: 900
+        connect_timeout: 60
         test_command: uptime
 
     # =========================================================================
@@ -471,35 +469,33 @@
 
     - name: Display server hardening summary
       debug:
-        msg: |
-
-          ╔══════════════════════════════════════════════════════════╗
-          ║   Server Foundation Ready - {{ host_name }}
-          ╚══════════════════════════════════════════════════════════╝
-
-            EBS Volume:
-              Device:    {{ ebs_nvme_device }}
-              Mount:     {{ apps_root }}  (all app code + data)
-              Logs:      {{ logs_root }}  (all app logs)
-              Size:      {{ ebs_volume_size }} GB {{ ebs_volume_type }}
-              Encrypted: {{ ebs_volume_encrypted }}
-
-            Security:
-              SSH         - key-only auth, no root, 3 retries, 5-min idle timeout
-              UFW         - default deny; ports 22, 80, 443 open
-              Sysctl      - IP spoofing, SYN flood, redirect mitigations
-              Auto-update - unattended security patches enabled
-              Fail2ban    - SSH brute-force protection active
-              /run/shm    - noexec, nosuid
-
-            Shared services:
-              supervisor - running, no programs (apps add their own)
-              rsyslog    - system logging active
-
-            ✓ Server rebooted and back online — all changes active.
-
-            Deploy an app:
-              ansible-playbook playbooks/setup.yml --vault-password-file ~/.vault_pass
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ✓ Server Foundation Ready - {{ host_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  EBS Volume:"
+          - "    Device:    {{ ebs_nvme_device }}"
+          - "    Mount:     {{ apps_root }}  (all app code + data)"
+          - "    Logs:      {{ logs_root }}  (all app logs)"
+          - "    Size:      {{ ebs_volume_size }} GB {{ ebs_volume_type }}"
+          - "    Encrypted: {{ ebs_volume_encrypted }}"
+          - ""
+          - "  Security:"
+          - "    SSH         — key-only auth, no root, 3 retries, 5-min idle timeout"
+          - "    UFW         — default deny; ports 22, 80, 443 open"
+          - "    Sysctl      — IP spoofing, SYN flood, redirect mitigations"
+          - "    Auto-update — unattended security patches enabled"
+          - "    Fail2ban    — SSH brute-force protection active"
+          - "    /run/shm    — noexec, nosuid"
+          - ""
+          - "  Shared services:"
+          - "    supervisor — running, no programs yet (apps add their own)"
+          - "    rsyslog    — system logging active"
+          - ""
+          - "  ✓ Server rebooted and back online — all changes active."
+          - ""
+          - "  Deploy an app to this server from your app's own repo."
 
 
   handlers:

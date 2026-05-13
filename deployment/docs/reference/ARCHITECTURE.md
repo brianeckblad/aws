@@ -16,14 +16,13 @@ Layer 1 — Server Foundation (this repo)
 │  ├── Security group     {host_name}-sg                 │
 │  ├── IAM role           {host_name}-ec2-role           │
 │  ├── SSH key pair       {host_name}-key                │
-│  ├── EC2 instance       Ubuntu 24.04, t3.micro         │
+│  ├── EC2 instance       Ubuntu 24.04, t3.small          │
 │  │   └── EBS data vol   /opt/apps (100 GB, XFS)        │
 │  └── harden-server.yml                                 │
 │      ├── SSH: key-only, no root, fail2ban, idle timeout│
 │      ├── UFW: default deny; allow 22, 80, 443          │
 │      ├── sysctl: SYN flood, IP spoof, IPv6 disabled    │
 │      ├── unattended-upgrades: daily security patches   │
-│      ├── nginx: default-deny vhost, security headers   │
 │      └── supervisor: shared process manager (empty)    │
 └────────────────────────────────────────────────────────┘
 
@@ -31,7 +30,7 @@ Layer 2 — Application Deployment (each app's own repo)
 ┌────────────────────────────────────────────────────────┐
 │                                                        │
 │  setup.yml (per app)                                   │
-│  ├── nginx vhost + SSL  /etc/nginx/sites-available/    │
+│  ├── reverse proxy + SSL  (managed by app's setup.yml)    │
 │  ├── supervisor program /etc/supervisor/conf.d/        │
 │  ├── Python venv        /opt/apps/{app_name}/.venv     │
 │  ├── app code           /opt/apps/{app_name}/          │
@@ -50,7 +49,7 @@ Multiple applications share one EC2 instance with the following isolation:
 | Resource | How isolation works |
 |----------|-------------------|
 | File system | Each app gets `/opt/apps/{app_name}/` with its own Unix user and permissions |
-| Network | Each app listens on a unique loopback port (`127.0.0.1:8000`, `8001`, …); nginx routes by `server_name` |
+| Network | Each app listens on a unique loopback port (`127.0.0.1:8000`, `8001`, …); reverse proxy routes by `server_name` |
 | Processes | Each app is a separate supervisor program with its own restart policy |
 | Logs | Each app writes to `/var/log/apps/{app_name}/` |
 | Secrets | Each app reads its own Secrets Manager path (`{app_name}/production`) |
@@ -63,9 +62,9 @@ Multiple applications share one EC2 instance with the following isolation:
 ### EC2 Instance
 
 - **OS:** Ubuntu 24.04 LTS
-- **Default type:** t3.micro (Nitro-based, NVMe EBS)
+- **Default type:** t3.small (Nitro-based, NVMe EBS)
 - **AMI:** Latest Ubuntu 24.04 LTS resolved at deploy time via `amazon.aws.ec2_ami_info`
-- **EBS root:** gp3, 20 GB, deleted on termination (OS + config only)
+- **EBS root:** gp3, 8 GB, deleted on termination (OS + config only)
 - **EBS data:** gp3, 100 GB, encrypted, **survives termination** — all app code and data live here
 
 ### IAM Role
@@ -124,9 +123,8 @@ Local Machine
 | Technology | Why |
 |-----------|-----|
 | **Ubuntu 24.04 LTS** | Long-term support until 2029; standard for Python apps; AWS provides maintained AMIs |
-| **nginx** | Battle-tested reverse proxy; fast static file serving; strong SSL support |
 | **supervisor** | Simple process manager for Python apps; auto-restart on crash; centralized log management |
-| **fail2ban** | Automatic IP banning on repeated SSH/HTTP failures; works with UFW |
+| **fail2ban** | Automatic IP banning on repeated SSH failures; works with UFW |
 | **UFW** | Simple iptables frontend; clear allow/deny rules; complements AWS Security Group |
 | **XFS on EBS** | Performant for many small files (Python bytecode, logs); supports online resize |
 | **Ansible vault** | Encrypted secrets committed to git — no separate secrets backend required for deployment config |

@@ -326,19 +326,18 @@
 
     - name: Display update summary
       debug:
-        msg: |
-
-          ╔══════════════════════════════════════════════════════════╗
-          ║   Server Updated - {{ host_name }}
-          ╚══════════════════════════════════════════════════════════╝
-
-            Packages:   upgraded + autoremoved
-            SSH config: re-applied (drop-in 99-hardening.conf)
-            sysctl:     re-applied
-            fail2ban:   config updated
-            logrotate:  config updated
-
-          {{ '  ✓  Rebooted — new kernel active.' if reboot_required_file.stat.exists else '  ✓  No reboot required.' }}
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ✓ Server Updated - {{ host_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  ✓ Packages:   upgraded + autoremoved"
+          - "  ✓ SSH config: re-applied (drop-in 99-hardening.conf)"
+          - "  ✓ sysctl:     re-applied"
+          - "  ✓ fail2ban:   config updated"
+          - "  ✓ logrotate:  config updated"
+          - ""
+          - "  {{ '✓ Rebooted — new kernel active.' if reboot_required_file.stat.exists else '✓ No reboot required.' }}"
 
   handlers:
     - name: restart fail2ban

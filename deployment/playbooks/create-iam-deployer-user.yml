@@ -3,7 +3,7 @@
 #
 # Run this ONCE with temporary root credentials before any other playbook.
 # Creates a scoped IAM user ({{ host_name }}-deployer) with the minimum
-# permissions required to provision and manage this specific EC2 server.
+d# permissions required to provision and manage this specific EC2 server.
 #
 # Policies (all scoped to this server's resources):
 #   EC2        — instances/SGs/keys/volumes tagged or named {host_name}*
@@ -347,32 +347,35 @@
     # -------------------------------------------------------------------------
     - name: Display deployer user summary
       debug:
-        msg: |
-
-          ✓ IAM User: {{ deployer_user_name }}
-            Account:  {{ aws_account_id }}
-
-            Policies (scoped to {{ host_name }}* resources):
-              {{ host_name }}-deployer-ec2
-                EC2 describe:    Resource:* (AWS requirement for Describe actions)
-                Security groups: {{ host_name }}-* tag only
-                Key pairs:       {{ host_name }}-* name only
-                Instances:       Name={{ host_name }} tag only
-                Volumes:         {{ host_name }}-* tag only
-
-              {{ host_name }}-deployer-iam
-                Roles:           arn:aws:iam::{{ aws_account_id }}:role/{{ host_name }}-*
-                Instance profiles: arn:aws:iam::{{ aws_account_id }}:instance-profile/{{ host_name }}-*
-                Users:           arn:aws:iam::{{ aws_account_id }}:user/{{ host_name }}-*
-
-              {{ host_name }}-deployer-sts
-                sts:GetCallerIdentity only
-
-          ⚠  Access Key (save this now — shown only once):
-               Access Key ID:     {{ deployer_key_id }}
-               Secret Access Key: {{ deployer_secret_key }}
-
-            Next steps:
-              1.  aws configure   (enter the key above, replace root credentials)
-              2.  aws sts get-caller-identity   (verify ARN shows {{ deployer_user_name }})
-              3.  Delete the root access key from the AWS console
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ✓ IAM Deployer User Created - {{ deployer_user_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  User:    {{ deployer_user_name }}"
+          - "  Account: {{ aws_account_id }}"
+          - ""
+          - "  Policies (scoped to {{ host_name }}* resources):"
+          - "    {{ host_name }}-deployer-ec2"
+          - "      EC2 describe:    Resource:* (AWS requirement for Describe actions)"
+          - "      Security groups: {{ host_name }}-* tag only"
+          - "      Key pairs:       {{ host_name }}-* name only"
+          - "      Instances:       Name={{ host_name }} tag only"
+          - "      Volumes:         {{ host_name }}-* tag only"
+          - ""
+          - "    {{ host_name }}-deployer-iam"
+          - "      Roles:            arn:aws:iam::{{ aws_account_id }}:role/{{ host_name }}-*"
+          - "      Instance profiles: arn:aws:iam::{{ aws_account_id }}:instance-profile/{{ host_name }}-*"
+          - "      Users:            arn:aws:iam::{{ aws_account_id }}:user/{{ host_name }}-*"
+          - ""
+          - "    {{ host_name }}-deployer-sts"
+          - "      sts:GetCallerIdentity only"
+          - ""
+          - "  ⚠  Access Key (save this now — shown only once):"
+          - "       Access Key ID:     {{ deployer_key_id }}"
+          - "       Secret Access Key: {{ deployer_secret_key }}"
+          - ""
+          - "  Next steps:"
+          - "    1. aws configure   (enter the key above, replace root credentials)"
+          - "    2. aws sts get-caller-identity   (verify ARN shows {{ deployer_user_name }})"
+          - "    3. Delete the root access key from the AWS console"

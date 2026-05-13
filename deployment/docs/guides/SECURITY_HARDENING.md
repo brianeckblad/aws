@@ -8,7 +8,7 @@ What `harden-server.yml` applies, how to verify each control, and how to audit t
 
 All hardening is applied automatically by `harden-server.yml` during `provision-server.yml`. Nothing requires manual configuration — this document explains what was applied so you can verify and audit it.
 
-The hardening is **server-level**. Application-level controls (SSL certificates, nginx vhosts, log rotation per app) are the responsibility of each application's own deployment playbook.
+The hardening is **server-level**. Application-level controls (SSL certificates, log rotation per app) are the responsibility of each application's own deployment playbook.
 
 ---
 
@@ -58,8 +58,7 @@ sudo ufw status verbose
 
 | Jail | Max retries | Find time | Ban time |
 |------|-------------|-----------|----------|
-| `sshd` | 3 | 20 min | 24 hours |
-| `nginx-http-auth` | 3 | 10 min | 10 min |
+| `sshd` | 5 | 20 min | 24 hours |
 
 Verify:
 
@@ -146,47 +145,6 @@ sudo tail -50 /var/log/unattended-upgrades/unattended-upgrades.log
 
 ---
 
-### Nginx — default-deny vhost
-
-Nginx is installed with:
-
-- `server_tokens off` — version not exposed in headers or error pages
-- Global security headers on all responses
-- A catch-all default vhost that **returns 444** (no response) for any request that does not match a configured `server_name`
-
-This prevents:
-- IP-direct access probing (`curl http://<IP>` returns nothing instead of serving an app)
-- Hostname enumeration
-- Requests for unconfigured domains
-
-**Global security headers applied to all vhosts:**
-
-| Header | Value |
-|--------|-------|
-| `X-Frame-Options` | `SAMEORIGIN` |
-| `X-Content-Type-Options` | `nosniff` |
-| `X-XSS-Protection` | `1; mode=block` |
-| `Referrer-Policy` | `strict-origin-when-cross-origin` |
-
-Verify:
-
-```bash
-# Default-deny — should return nothing (connection closes)
-curl -v http://<SERVER_IP>
-# Expected: empty reply from server (no HTTP response)
-
-# Security headers — test after an app is deployed under a real domain
-curl -I https://your-app.example.com | grep -E "X-Frame|X-Content|X-XSS|Referrer"
-```
-
-Test nginx config:
-
-```bash
-sudo nginx -t
-sudo systemctl status nginx
-```
-
----
 
 ### Supervisor
 
@@ -250,11 +208,7 @@ sudo sysctl net.ipv4.tcp_syncookies net.ipv6.conf.all.disable_ipv6 net.ipv4.tcp_
 
 echo ""
 echo "=== Services ==="
-sudo systemctl is-active nginx supervisor unattended-upgrades fail2ban
-
-echo ""
-echo "=== Default-deny vhost ==="
-curl -sv http://localhost 2>&1 | grep -E "< HTTP|Empty reply"
+sudo systemctl is-active supervisor unattended-upgrades fail2ban
 
 echo ""
 echo "=== Shared memory ==="

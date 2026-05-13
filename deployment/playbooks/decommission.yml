@@ -49,29 +49,28 @@
 
     - name: Display decommission plan
       debug:
-        msg: |
-
-          ╔══════════════════════════════════════════════════════════╗
-          ║   ⚠  DECOMMISSIONING ALL RESOURCES - {{ host_name }}
-          ╚══════════════════════════════════════════════════════════╝
-
-            Region: {{ aws_region }}
-
-            Will delete:
-              1. EC2 instance             (Name={{ host_name }})
-              2. EBS data volume          ({{ ebs_data_volume_name }})
-              3. SSH key pair             ({{ ssh_key_name }})
-              4. Security group           ({{ security_group_name }})
-              5. IAM role + profile       ({{ iam_role_name }})
-              6. IAM deployer user        ({{ host_name }}-deployer)
-                 ⚠  This is the LAST step — credentials become invalid after this.
-
-            Will NOT delete (app-level - manage from each app's repo):
-              - S3 buckets
-              - Secrets Manager entries
-              - CloudFront / CloudWatch
-
-            Starting teardown...
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ⚠  DECOMMISSIONING ALL RESOURCES - {{ host_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  Region: {{ aws_region }}"
+          - ""
+          - "  Will delete:"
+          - "    1. EC2 instance             (Name={{ host_name }})"
+          - "    2. EBS data volume          ({{ ebs_data_volume_name }})"
+          - "    3. SSH key pair             ({{ ssh_key_name }})"
+          - "    4. Security group           ({{ security_group_name }})"
+          - "    5. IAM role + profile       ({{ iam_role_name }})"
+          - "    6. IAM deployer user        ({{ host_name }}-deployer)"
+          - "       {{ '⚠  Will be DELETED — credentials become invalid after this.' if delete_deployer_user | default(false) | bool else '✓  Will be KEPT (credentials remain valid).' }}"
+          - ""
+          - "  Will NOT delete (app-level — manage from each app's repo):"
+          - "    - S3 buckets"
+          - "    - Secrets Manager entries"
+          - "    - CloudFront / CloudWatch"
+          - ""
+          - "  Starting teardown..."
 
 # ==============================================================================
 # Step 1: Terminate EC2 instance
@@ -114,6 +113,7 @@
 
 - name: Step 6 — Delete IAM Deployer User
   import_playbook: delete-iam-deployer-user.yml
+  when: delete_deployer_user | default(false) | bool
 
 # ==============================================================================
 # Final cleanup
@@ -134,28 +134,24 @@
 
     - name: Display decommission summary
       debug:
-        msg: |
-
-          ╔══════════════════════════════════════════════════════════╗
-          ║   Decommission Complete - {{ host_name }}
-          ╚══════════════════════════════════════════════════════════╝
-
-            Deleted:
-              ✓ EC2 instance:      {{ host_name }}
-              ✓ EBS data volume:   {{ ebs_data_volume_name }}
-              ✓ SSH key pair:      {{ ssh_key_name }}
-              ✓ Security group:    {{ security_group_name }}
-              ✓ IAM role:          {{ iam_role_name }}
-              ✓ Instance profile:  {{ iam_instance_profile_name }}
-              ✓ Deployer user:     {{ host_name }}-deployer
-
-            ⚠  AWS credentials are now invalid (deployer user deleted).
-               Reconfigure with root/admin credentials before running anything else.
-
-            Reminder — delete these manually if no longer needed:
-              - App S3 buckets   (managed by each app)
-              - App secrets      (managed by each app)
-
-            To provision a new server (requires new deployer user first):
-              ansible-playbook playbooks/create-iam-deployer-user.yml
-              ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ✓ Decommission Complete - {{ host_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  Deleted:"
+          - "    ✓ EC2 instance:     {{ host_name }}"
+          - "    ✓ EBS data volume:  {{ ebs_data_volume_name }}"
+          - "    ✓ SSH key pair:     {{ ssh_key_name }}"
+          - "    ✓ Security group:   {{ security_group_name }}"
+          - "    ✓ IAM role:         {{ iam_role_name }}"
+          - "    ✓ Instance profile: {{ iam_instance_profile_name }}"
+          - "    {{ '✓ Deployer user:    ' + host_name + '-deployer (credentials are now invalid)' if delete_deployer_user | default(false) | bool else '–  Deployer user:    ' + host_name + '-deployer (KEPT — credentials still valid)' }}"
+          - ""
+          - "  Reminder — delete these manually if no longer needed:"
+          - "    - App S3 buckets  (managed by each app)"
+          - "    - App secrets     (managed by each app)"
+          - ""
+          - "  To provision a new server:"
+          - "    ansible-playbook playbooks/create-iam-deployer-user.yml"
+          - "    ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass"

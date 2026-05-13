@@ -257,17 +257,45 @@
         access_time: preserve
 
     - name: Update ~/.ssh/config — server entry with live IP
-      blockinfile:
-        path: "{{ lookup('env', 'HOME') }}/.ssh/config"
-        marker: "# {mark} ANSIBLE MANAGED — {{ host_name }}"
-        block: |
-          Host {{ host_name }}
-              HostName {{ instance_ip }}
-              User {{ admin_user }}
-              IdentityFile {{ ssh_key_file }}
-              IdentitiesOnly yes
-              ServerAliveInterval 60
-              ServerAliveCountMax 10
+      environment:
+        SSH_HOST: "{{ host_name }}"
+        SSH_HOSTNAME: "{{ instance_ip }}"
+        SSH_USER: "{{ admin_user }}"
+        SSH_KEYFILE: "{{ ssh_key_file }}"
+      shell: |
+        python3 << 'PYEOF'
+        import os, pathlib, re
+        host     = os.environ['SSH_HOST']
+        hostname = os.environ['SSH_HOSTNAME']
+        user     = os.environ['SSH_USER']
+        keyfile  = os.environ['SSH_KEYFILE']
+
+        config_path = pathlib.Path.home() / '.ssh' / 'config'
+        config_path.parent.mkdir(mode=0o700, exist_ok=True)
+        config_path.touch(mode=0o600, exist_ok=True)
+        content = config_path.read_text()
+
+        # Remove stale ANSIBLE MANAGED marker lines for this host
+        content = re.sub(rf'(?m)^# (?:BEGIN|END) ANSIBLE MANAGED — {re.escape(host)}\n', '', content)
+        # Remove existing Host block for this host
+        content = re.sub(rf'(?m)^Host {re.escape(host)}\n(?:[ \t]+[^\n]*\n)*', '', content)
+        content = re.sub(r'\n{3,}', '\n\n', content).strip()
+
+        new_block = (
+            f'Host {host}\n'
+            f'    HostName {hostname}\n'
+            f'    User {user}\n'
+            f'    IdentityFile {keyfile}\n'
+            f'    IdentitiesOnly yes\n'
+            f'    ServerAliveInterval 60\n'
+            f'    ServerAliveCountMax 10\n'
+        )
+        content = (content + '\n\n' + new_block) if content else new_block
+        config_path.write_text(content)
+        PYEOF
+      delegate_to: localhost
+      become: no
+      changed_when: true
 
     # -----------------------------------------------------------------
     # Save detailed instance information to a local reference file
@@ -340,7 +368,7 @@
              ansible-playbook playbooks/harden-server.yml
 
           2. Deploy an app to this server:
-             ansible-playbook playbooks/setup.yml --vault-password-file ~/.vault_pass
+             From your app's own repo, run its setup.yml playbook.
 
           ────────────────────────────────────────────────────────────
           USEFUL COMMANDS
@@ -378,14 +406,6 @@
     # -----------------------------------------------------------------
     # Post-launch validation
     # -----------------------------------------------------------------
-    - name: Wait for SSH to be fully ready (extra buffer for cloud-init)
-      wait_for:
-        host: "{{ instance_ip }}"
-        port: 22
-        delay: 20
-        sleep: 10
-        timeout: 600
-        state: started
 
     - name: Validate SSH connectivity
       command: >
@@ -397,6 +417,29 @@
       delay: 15
       until: ssh_check.rc == 0
       changed_when: false
+
+    # -----------------------------------------------------------------
+    # Wait for cloud-init to finish before handing off to harden-server.
+    # cloud-init runs apt/package operations in the background after first
+    # boot. If harden-server starts while cloud-init holds the dpkg lock,
+    # every sudo command hangs and wait_for_connection times out.
+    # `cloud-init status --wait` blocks until all stages are complete.
+    # -----------------------------------------------------------------
+    - name: Wait for cloud-init to complete
+      command: >
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30
+        -i {{ ssh_key_file }}
+        ubuntu@{{ instance_ip }} sudo cloud-init status --wait
+      register: cloud_init_status
+      retries: 3
+      delay: 10
+      until: cloud_init_status.rc == 0
+      changed_when: false
+      timeout: 300
+
+    - name: Show cloud-init status
+      debug:
+        msg: "cloud-init: {{ cloud_init_status.stdout | trim }}"
 
     - name: Validate EBS data volume is visible on instance
       command: >
@@ -429,23 +472,22 @@
 
     - name: Display launch summary and validation results
       debug:
-        msg: |
-
-          ╔══════════════════════════════════════════════════════════╗
-          ║   ✓ EC2 Instance Launched - {{ host_name }}
-          ╚══════════════════════════════════════════════════════════╝
-
-            Instance:  {{ instance_id }}  ({{ instance_type }})
-            Public IP: {{ instance_ip }}
-            AZ:        {{ ec2.instances[0].placement.availability_zone }}
-
-            Validation:
-              SSH:            {{ '✓ connected' if ssh_check.rc == 0 else '✗ FAILED - check port 22' }}
-              EBS volume:     {{ '✓ ' + ebs_nvme_device + ' present' if ebs_check.rc == 0 else '✗ ' + ebs_nvme_device + ' NOT found' }}
-              IAM profile:    {{ '✓ attached' if 'instance-profile' in iam_check.stdout else '✗ NOT attached' }}
-              Security group: {{ '✓ ports ' + sg_check.stdout | trim | replace('\t', ' ') if sg_check.rc == 0 else '✗ could not read' }}
-
-            Inventory: inventories/hosts.yml -> {{ instance_ip }}
-            Details:   instances/{{ instance_id }}.txt
-
-            SSH:  ssh -i {{ ssh_key_file }} ubuntu@{{ instance_ip }}
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ✓ EC2 Instance Launched - {{ host_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  Instance:  {{ instance_id }}  ({{ instance_type }})"
+          - "  Public IP: {{ instance_ip }}"
+          - "  AZ:        {{ ec2.instances[0].placement.availability_zone }}"
+          - ""
+          - "  Validation:"
+          - "    SSH:            {{ '✓ connected' if ssh_check.rc == 0 else '✗ FAILED — check port 22' }}"
+          - "    EBS volume:     {{ '✓ ' + ebs_nvme_device + ' present' if ebs_check.rc == 0 else '✗ ' + ebs_nvme_device + ' NOT found — check instance type is Nitro-based' }}"
+          - "    IAM profile:    {{ '✓ attached' if 'instance-profile' in iam_check.stdout else '✗ NOT attached' }}"
+          - "    Security group: {% if sg_check.rc == 0 %}✓ ports {{ sg_check.stdout | trim | replace('\t', ', ') }}{% else %}✗ could not read{% endif %}"
+          - ""
+          - "  Inventory: inventories/hosts.yml -> {{ instance_ip }}"
+          - "  Details:   instances/{{ instance_id }}.txt"
+          - ""
+          - "  SSH:  ssh -i {{ ssh_key_file }} ubuntu@{{ instance_ip }}"

@@ -11,7 +11,7 @@ Complete inventory of all security controls applied by this repo, with configura
 | Direction | Port | Protocol | Source | Rationale |
 |-----------|------|----------|--------|-----------|
 | Inbound | 22 | TCP | 0.0.0.0/0 | SSH — open to internet; host-level controls enforce auth |
-| Inbound | 80 | TCP | 0.0.0.0/0 | HTTP — nginx redirects to HTTPS; required for Let's Encrypt |
+| Inbound | 80 | TCP | 0.0.0.0/0 | HTTP |
 | Inbound | 443 | TCP | 0.0.0.0/0 | HTTPS |
 | Outbound | All | All | 0.0.0.0/0 | Package updates, Let's Encrypt, AWS APIs |
 
@@ -61,10 +61,9 @@ UFW and the AWS Security Group both enforce these rules independently. This is d
 
 | Jail | Max failures | Find window | Ban duration | Log source |
 |------|-------------|-------------|--------------|-----------|
-| `sshd` | 3 | 20 min | 24 hours | `/var/log/auth.log` |
-| `nginx-http-auth` | 3 | 10 min | 10 min | `/var/log/nginx/*error.log` |
+| `sshd` | 5 | 20 min | 24 hours | `/var/log/auth.log` |
 
-Repeat offenders (banned 3+ times in 24 hours) are escalated to a 7-day ban by the `recidive` jail.
+The `recidive` jail is disabled — 7-day bans stored in iptables survive fail2ban restarts and can cause a week-long SSH lockout.
 
 ### Kernel Parameters (`/etc/sysctl.d/`)
 
@@ -110,43 +109,6 @@ These services are not needed and represent unnecessary attack surface.
 
 ---
 
-## nginx Security Configuration
-
-### Global settings
-
-| Setting | Value | File |
-|---------|-------|------|
-| `server_tokens` | `off` | `nginx.conf` — version hidden from error pages and `Server:` header |
-
-### Global response headers
-
-Applied to all vhosts via `nginx.conf` `http {}` block:
-
-| Header | Value |
-|--------|-------|
-| `X-Frame-Options` | `SAMEORIGIN` |
-| `X-Content-Type-Options` | `nosniff` |
-| `X-XSS-Protection` | `1; mode=block` |
-| `Referrer-Policy` | `strict-origin-when-cross-origin` |
-
-### Default-deny vhost
-
-A catch-all server block with no `server_name` returns **444** (close connection without response) for all requests that do not match a configured application vhost.
-
-```nginx
-server {
-    listen 80 default_server;
-    listen 443 default_server ssl;
-    return 444;
-}
-```
-
-This prevents:
-- IP-direct access (`curl http://<IP>`)
-- HTTP Host header probing
-- Serving content to scanners and bots on unconfigured domains
-
----
 
 ## Application-Level Scope
 
@@ -155,7 +117,7 @@ The following are **not** managed by this repo. Each app's own deployment handle
 | Control | Managed by |
 |---------|-----------|
 | SSL/TLS certificates | Each app's `setup.yml` (Let's Encrypt via certbot) |
-| nginx vhost config | Each app's `setup.yml` |
+| Reverse proxy config | Each app's `setup.yml` |
 | App file permissions | Each app's `setup.yml` |
 | App log rotation | Each app's `setup.yml` |
 | Secrets Manager setup | Each app's `setup.yml` or admin |

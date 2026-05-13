@@ -92,7 +92,6 @@ unattended-upgrades  ← running, automatic security patches enabled
 The server is **ready for application deployment** from each app's own repo.
 
 Each app will:
-- Add an nginx vhost under `/etc/nginx/sites-available/`
 - Add a supervisor program under `/etc/supervisor/conf.d/`
 - Deploy code to `/opt/apps/{app_name}/`
 - Write logs to `/var/log/apps/{app_name}/`
@@ -143,10 +142,18 @@ This also updates the security group SSH rule to your current public IP before c
 To tear down all AWS resources for this server:
 
 ```bash
-ansible-playbook playbooks/decommission.yml --vault-password-file ~/.vault_pass
+./scripts/decommission.sh
 ```
 
-See [Decommission](DECOMMISSION.md) for full details and what is and isn't deleted.
+Or run the playbook directly:
+
+```bash
+ansible-playbook playbooks/decommission.yml \
+  --vault-password-file ~/.vault_pass \
+  -e decommission_confirmed=true
+```
+
+This removes all 6 resource types in order (EC2 → EBS data volume → SSH key → security group → IAM role → optionally the IAM deployer user). See [Decommission](DECOMMISSION.md) for full details.
 
 ---
 
