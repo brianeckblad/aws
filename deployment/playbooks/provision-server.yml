@@ -120,7 +120,6 @@
           - "  Server foundation:"
           - "    EBS:             {{ ebs_volume_size }} GB mounted at {{ apps_root }}"
           - "    Logs:            {{ logs_root }}"
-          - "    nginx:           running (no vhosts yet)"
           - "    supervisor:      running (no programs yet)"
           - "    fail2ban:        active"
           - "    UFW:             deny ingress; 22/80/443 open"

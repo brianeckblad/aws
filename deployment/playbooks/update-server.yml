@@ -4,10 +4,10 @@
 # Use this after the server is already provisioned to:
 #   - Upgrade OS packages
 #   - Install any newly added system_packages
-#   - Re-apply nginx, fail2ban, sysctl, SSH config (idempotent)
+#   - Re-apply fail2ban, sysctl, SSH hardening config (idempotent)
 #   - Update the security group SSH rule to the current deployer IP
 #   - Reload/restart services as needed
-#   - Warn if a reboot is required
+#   - Reboot if a new kernel was installed
 #
 # Safe to re-run at any time. Skips initial-setup-only tasks
 # (EBS formatting, volume mounting, service installation).
@@ -59,12 +59,12 @@
             from_port: 80
             to_port: 80
             cidr_ip: 0.0.0.0/0
-            rule_desc: "HTTP - nginx (redirect to HTTPS)"
+            rule_desc: "HTTP"
           - proto: tcp
             from_port: 443
             to_port: 443
             cidr_ip: 0.0.0.0/0
-            rule_desc: "HTTPS - nginx (TLS termination, proxy to apps)"
+            rule_desc: "HTTPS"
 
     - name: Show SSH restriction update
       debug:
@@ -76,6 +76,7 @@
 - name: Update Server — OS packages and configuration
   hosts: all
   become: yes
+  gather_facts: no
   vars_files:
     - ../group_vars/all.yml
     - ../group_vars/vault.yml
@@ -84,19 +85,15 @@
     system_packages:
       # Core utilities
       - curl
-      - wget
       - git
       - unzip
       - htop
-      - tree
-      - jq
+      - net-tools
       # Security
       - ufw
       - fail2ban
       - unattended-upgrades
-      - apt-listchanges
-      # Web / process management
-      - nginx
+      # Process management
       - supervisor
       # Python runtime
       - python3
@@ -105,12 +102,48 @@
       # Logging
       - rsyslog
       - logrotate
-      # Filesystem / EBS tools
+      # Filesystem / EBS tools (XFS for data volume)
       - nvme-cli
       - xfsprogs
-      - e2fsprogs
+
+  pre_tasks:
+    - name: Wait for SSH to become available
+      wait_for_connection:
+        delay: 5
+        sleep: 10
+        timeout: 300
+
+    - name: Gather facts
+      gather_facts:
 
   tasks:
+
+    # =========================================================================
+    # UFW PRE-FLIGHT — whitelist deployer IP before anything else
+    # =========================================================================
+
+    - name: Get deployer public IP
+      command: curl -4 -s --max-time 10 ifconfig.me
+      register: deployer_ip_raw
+      delegate_to: localhost
+      become: no
+      changed_when: false
+
+    - name: Set deployer IP fact
+      set_fact:
+        deployer_ip: "{{ deployer_ip_raw.stdout | trim }}"
+
+    - name: UFW pre-flight — whitelist deployer IP
+      ufw:
+        rule: allow
+        from_ip: "{{ deployer_ip }}"
+        comment: "Deployer - unrestricted access"
+
+    - name: UFW pre-flight — ensure SSH port 22 is open
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
 
     # =========================================================================
     # PACKAGES
@@ -120,7 +153,7 @@
       apt:
         upgrade: dist
         update_cache: yes
-        cache_valid_time: 0      # always refresh on an explicit update run
+        cache_valid_time: 0
       register: apt_upgrade
 
     - name: Ensure all system packages are present
@@ -138,56 +171,52 @@
         path: /var/run/reboot-required
       register: reboot_required_file
 
-    - name: Warn if reboot required
-      debug:
-        msg: "⚠  Reboot required — run: ssh {{ admin_user }}@{{ ansible_host }} 'sudo reboot'"
-      when: reboot_required_file.stat.exists
-
     # =========================================================================
-    # SSH HARDENING — re-apply in case sshd_config was modified
+    # SSH HARDENING — re-apply drop-in config
     # =========================================================================
 
-    - name: SSH — Disable password authentication
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?PasswordAuthentication'
-        line: 'PasswordAuthentication no'
-      notify: restart sshd
+    - name: SSH — Remove cloud-init override
+      file:
+        path: /etc/ssh/sshd_config.d/50-cloud-init.conf
+        state: absent
 
-    - name: SSH — Disable root login
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?PermitRootLogin'
-        line: 'PermitRootLogin no'
-      notify: restart sshd
+    - name: SSH — Write hardening drop-in config
+      copy:
+        dest: /etc/ssh/sshd_config.d/99-hardening.conf
+        owner: root
+        group: root
+        mode: '0600'
+        content: |
+          # Managed by Ansible — do not edit manually.
+          PasswordAuthentication no
+          ChallengeResponseAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          PermitRootLogin no
+          MaxAuthTries 3
+          MaxSessions 5
+          ClientAliveInterval 300
+          ClientAliveCountMax 2
+          X11Forwarding no
+          AllowAgentForwarding no
+          AllowTcpForwarding no
 
-    - name: SSH — Limit auth retries
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?MaxAuthTries'
-        line: 'MaxAuthTries 3'
-      notify: restart sshd
+    - name: SSH — Validate config before restarting
+      command: sshd -t
+      changed_when: false
 
-    - name: SSH — Disable X11 forwarding
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?X11Forwarding'
-        line: 'X11Forwarding no'
-      notify: restart sshd
+    - name: SSH — Restart sshd async
+      service:
+        name: ssh
+        state: restarted
+      async: 60
+      poll: 0
 
-    - name: SSH — Client idle timeout
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?ClientAliveInterval'
-        line: 'ClientAliveInterval 300'
-      notify: restart sshd
-
-    - name: SSH — Max keepalive count
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?ClientAliveCountMax'
-        line: 'ClientAliveCountMax 2'
-      notify: restart sshd
+    - name: SSH — Wait for sshd to come back
+      wait_for_connection:
+        delay: 5
+        sleep: 5
+        timeout: 120
 
     # =========================================================================
     # AUTOMATIC SECURITY UPDATES
@@ -260,56 +289,6 @@
         enabled: yes
 
     # =========================================================================
-    # NGINX
-    # =========================================================================
-
-    - name: Update nginx hardening config
-      copy:
-        dest: /etc/nginx/conf.d/hardening.conf
-        content: |
-          # Global nginx hardening — applied to all vhosts
-          # DO NOT remove; shared by all apps on this server.
-
-          server_tokens off;
-          client_max_body_size 25m;
-
-          client_body_timeout   12;
-          client_header_timeout 12;
-          keepalive_timeout     15;
-          send_timeout          10;
-
-          add_header X-Frame-Options        "SAMEORIGIN"                      always;
-          add_header X-Content-Type-Options "nosniff"                         always;
-          add_header X-XSS-Protection       "1; mode=block"                   always;
-          add_header Referrer-Policy        "strict-origin-when-cross-origin" always;
-        owner: root
-        group: root
-        mode: '0644'
-      notify: reload nginx
-
-    - name: Test nginx configuration
-      command: nginx -t
-      changed_when: false
-      register: nginx_test
-      failed_when: nginx_test.rc != 0
-
-    - name: Ensure nginx is running and enabled
-      service:
-        name: nginx
-        state: started
-        enabled: yes
-
-    # =========================================================================
-    # SUPERVISOR
-    # =========================================================================
-
-    - name: Ensure supervisor is running and enabled
-      service:
-        name: supervisor
-        state: started
-        enabled: yes
-
-    # =========================================================================
     # LOGGING
     # =========================================================================
 
@@ -328,6 +307,20 @@
         enabled: yes
 
     # =========================================================================
+    # REBOOT if kernel was updated
+    # =========================================================================
+
+    - name: Reboot if kernel upgrade requires it
+      ansible.builtin.reboot:
+        msg: "Rebooting after kernel upgrade"
+        pre_reboot_delay: 5
+        post_reboot_delay: 15
+        reboot_timeout: 300
+        connect_timeout: 20
+        test_command: uptime
+      when: reboot_required_file.stat.exists
+
+    # =========================================================================
     # SUMMARY
     # =========================================================================
 
@@ -340,27 +333,15 @@
           ╚══════════════════════════════════════════════════════════╝
 
             Packages:   upgraded + autoremoved
-            SSH config: re-applied
+            SSH config: re-applied (drop-in 99-hardening.conf)
             sysctl:     re-applied
             fail2ban:   config updated
-            nginx:      hardening config updated
             logrotate:  config updated
 
-          {{ '  ⚠  REBOOT REQUIRED — run: ssh ' + admin_user + '@' + ansible_host + ' sudo reboot' if reboot_required_file.stat.exists else '  ✓  No reboot required.' }}
+          {{ '  ✓  Rebooted — new kernel active.' if reboot_required_file.stat.exists else '  ✓  No reboot required.' }}
 
   handlers:
-    - name: restart sshd
-      service:
-        name: ssh
-        state: restarted
-
     - name: restart fail2ban
       service:
         name: fail2ban
         state: restarted
-
-    - name: reload nginx
-      service:
-        name: nginx
-        state: reloaded
-
