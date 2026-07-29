@@ -149,46 +149,43 @@
 
     # -----------------------------------------------------------------
     # Tag the EBS volumes for easy identification in the AWS console
+    # Volume IDs come from the launch register (block_device_mappings),
+    # so no external `aws` CLI dependency is required.
     # -----------------------------------------------------------------
-    - name: Get root volume ID
-      shell: >
-        aws ec2 describe-volumes
-        --region {{ aws_region }}
-        --filters
-        "Name=attachment.instance-id,Values={{ instance_id }}"
-        "Name=attachment.device,Values={{ ami_root_device }}"
-        --query "Volumes[0].VolumeId"
-        --output text
-      register: root_vol
-      changed_when: false
-
-    - name: Get data volume ID
-      shell: >
-        aws ec2 describe-volumes
-        --region {{ aws_region }}
-        --filters
-        "Name=attachment.instance-id,Values={{ instance_id }}"
-        "Name=attachment.device,Values={{ ebs_device_name }}"
-        --query "Volumes[0].VolumeId"
-        --output text
-      register: data_vol
-      changed_when: false
+    - name: Resolve volume IDs from block device mappings
+      set_fact:
+        root_volume_id: >-
+          {{
+            ec2.instances[0].block_device_mappings
+            | selectattr('device_name', 'equalto', ami_root_device)
+            | map(attribute='ebs.volume_id')
+            | first
+            | default('')
+          }}
+        data_volume_id: >-
+          {{
+            ec2.instances[0].block_device_mappings
+            | selectattr('device_name', 'equalto', ebs_device_name)
+            | map(attribute='ebs.volume_id')
+            | first
+            | default('')
+          }}
 
     - name: Tag root (boot) volume
       amazon.aws.ec2_tag:
         region: "{{ aws_region }}"
-        resource: "{{ root_vol.stdout }}"
+        resource: "{{ root_volume_id }}"
         tags:
           Name: "{{ ebs_boot_volume_name }}"
           Server: "{{ host_name }}"
           Role: boot
           ManagedBy: Ansible
-      when: root_vol.stdout != "None"
+      when: root_volume_id | length > 0
 
     - name: Tag data volume
       amazon.aws.ec2_tag:
         region: "{{ aws_region }}"
-        resource: "{{ data_vol.stdout }}"
+        resource: "{{ data_volume_id }}"
         tags:
           Name: "{{ ebs_data_volume_name }}"
           Server: "{{ host_name }}"
@@ -196,7 +193,7 @@
           MountPoint: "{{ apps_root }}"
           DeleteOnTermination: "{{ ebs_data_delete_on_termination | string }}"
           ManagedBy: Ansible
-      when: data_vol.stdout != "None"
+      when: data_volume_id | length > 0
 
     # -----------------------------------------------------------------
     # Wait for SSH to become available before continuing
@@ -338,13 +335,13 @@
           ────────────────────────────────────────────────────────────
 
           Root Volume ({{ ebs_boot_volume_name }}):
-            Volume ID:          {{ root_vol.stdout }}
+            Volume ID:          {{ root_volume_id }}
             Size:               8 GB gp3
             Mount:              / (OS)
             Delete on terminate: {{ ebs_boot_delete_on_termination }}
 
           Data Volume ({{ ebs_data_volume_name }}):
-            Volume ID:          {{ data_vol.stdout }}
+            Volume ID:          {{ data_volume_id }}
             Device:             {{ ebs_device_name }} → {{ ebs_nvme_device }} (NVMe)
             Size:               {{ ebs_volume_size }} GB {{ ebs_volume_type }}
             Encrypted:          {{ ebs_volume_encrypted }}
@@ -451,24 +448,35 @@
       changed_when: false
 
     - name: Validate IAM instance profile is attached
-      command: >
-        aws ec2 describe-instances
-        --instance-ids {{ instance_id }}
-        --region {{ aws_region }}
-        --query "Reservations[0].Instances[0].IamInstanceProfile.Arn"
-        --output text
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        instance_ids: ["{{ instance_id }}"]
       register: iam_check
-      changed_when: false
+
+    - name: Set IAM profile validation fact
+      set_fact:
+        iam_profile_arn: "{{ iam_check.instances[0].iam_instance_profile.arn | default('') }}"
 
     - name: Validate security group ports
-      shell: >
-        aws ec2 describe-security-groups
-        --group-names {{ security_group_name }}
-        --region {{ aws_region }}
-        --query "SecurityGroups[0].IpPermissions[].FromPort"
-        --output text
+      amazon.aws.ec2_security_group_info:
+        region: "{{ aws_region }}"
+        filters:
+          group-name: "{{ security_group_name }}"
       register: sg_check
-      changed_when: false
+
+    - name: Set security group ports fact
+      set_fact:
+        sg_open_ports: >-
+          {{
+            sg_check.security_groups[0].ip_permissions
+            | map(attribute='from_port')
+            | select('defined')
+            | map('string')
+            | list
+            | join(', ')
+            if sg_check.security_groups | length > 0
+            else ''
+          }}
 
     - name: Display launch summary and validation results
       debug:
@@ -484,8 +492,8 @@
           - "  Validation:"
           - "    SSH:            {{ '✓ connected' if ssh_check.rc == 0 else '✗ FAILED — check port 22' }}"
           - "    EBS volume:     {{ '✓ ' + ebs_nvme_device + ' present' if ebs_check.rc == 0 else '✗ ' + ebs_nvme_device + ' NOT found — check instance type is Nitro-based' }}"
-          - "    IAM profile:    {{ '✓ attached' if 'instance-profile' in iam_check.stdout else '✗ NOT attached' }}"
-          - "    Security group: {% if sg_check.rc == 0 %}✓ ports {{ sg_check.stdout | trim | replace('\t', ', ') }}{% else %}✗ could not read{% endif %}"
+          - "    IAM profile:    {{ '✓ attached' if 'instance-profile' in iam_profile_arn else '✗ NOT attached' }}"
+          - "    Security group: {{ '✓ ports ' + sg_open_ports if sg_open_ports | length > 0 else '✗ could not read' }}"
           - ""
           - "  Inventory: inventories/hosts.yml -> {{ instance_ip }}"
           - "  Details:   instances/{{ instance_id }}.txt"

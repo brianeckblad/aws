@@ -11,6 +11,8 @@
 | [Prerequisites](guides/PREREQUISITES.md) | AWS account, local tools, vault setup |
 | [Quick Start](guides/QUICKSTART.md) | Provision the server in one command |
 | [Manual Deployment](guides/MANUAL_DEPLOYMENT.md) | Step-by-step with AWS Console and CLI for each resource |
+| [Redeploy](guides/REDEPLOY.md) | Rebuild instance with fresh OS while preserving data |
+| [AWS Deployer User](guides/AWS_DEPLOYER_USER.md) | Shared vs per-server deployer, when to use which |
 | [Decommission](guides/DECOMMISSION.md) | Tear down the server and remove all AWS resources |
 | [Git Configuration](guides/GIT_CONFIGURATION.md) | Configure git identity for this repo |
 | [Infrastructure](guides/INFRASTRUCTURE.md) | AWS resource reference (EC2, IAM, SG, SSH key, EBS) |
@@ -51,6 +53,16 @@ Provision:
   ├── create-ssh-key.yml
   ├── launch-ec2-instance.yml
   └── harden-server.yml
+
+Redeploy (fresh OS, preserves data):
+  redeploy-server.yml           ← master (runs all 3 below in order)
+  ├── terminate-ec2-instance.yml
+  ├── launch-ec2-instance.yml
+  └── harden-server.yml
+      (+ auto-reattaches existing data volume)
+
+Update:
+  update-server.yml             ← upgrade packages, re-apply configs
 
 Decommission:
   decommission.yml              ← master (runs all 6 below in order)

@@ -137,7 +137,17 @@ ansible-playbook playbooks/update-server.yml --vault-password-file ~/.vault_pass
 
 This also updates the security group SSH rule to your current public IP before connecting, so it works even if your IP has changed.
 
-### 4. Decommission
+### 4. Redeploy (fresh OS, keep data)
+
+To rebuild the instance on the latest Ubuntu 24.04 LTS AMI while preserving `/opt/apps`:
+
+```bash
+ansible-playbook playbooks/redeploy-server.yml --vault-password-file ~/.vault_pass
+```
+
+This terminates the instance, launches a new one, reattaches the existing data volume, and re-hardens. A new public IP is assigned — update DNS afterwards. See [Redeploy](REDEPLOY.md) for details.
+
+### 5. Decommission
 
 To tear down all AWS resources for this server:
 
@@ -161,7 +171,7 @@ This removes all 6 resource types in order (EC2 → EBS data volume → SSH key 
 
 | Problem | Fix |
 |---------|-----|
-| `Unable to locate credentials` | `aws configure` — re-enter deployer key and secret |
+| `Unable to locate credentials` | `aws configure` — re-enter deployer key and secret. Using a named profile? Set `aws_profile` in vault and `source scripts/load-vars.sh`. See [AWS Deployer User](AWS_DEPLOYER_USER.md) |
 | `No module named 'boto3'` | `pip install -r requirements.txt` (run from repo root) |
 | `UNREACHABLE` after EC2 launch | Wait 60–90 seconds for SSH to come up and re-run `harden-server.yml` |
 | `Permission denied (publickey)` | Check `~/.ssh/${host_name}-key.pem` exists and has `chmod 600` |

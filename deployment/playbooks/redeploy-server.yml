@@ -1,0 +1,322 @@
+---
+# redeploy-server.yml — Redeploy EC2 instance with latest AMI, preserving data
+#
+# Use this when:
+#   - Ubuntu update breaks the system
+#   - You want latest OS patches (faster than apt upgrade)
+#   - Instance has issues and you want a fresh start
+#
+# This will:
+#   1. Terminate the current EC2 instance
+#   2. Launch a new instance with the latest Ubuntu 24.04 LTS AMI
+#   3. Reattach the existing data volume (preserves /opt/apps)
+#   4. Run full security hardening
+#
+# Prerequisites:
+#   - Existing data volume must exist (check with describe-volumes)
+#   - Set existing_data_volume_id in vault.yml OR it will auto-detect
+#
+# Usage:
+#   ansible-playbook playbooks/redeploy-server.yml \
+#     --vault-password-file ~/.vault_pass
+#
+# Safety:
+#   - Data volume is preserved (ebs_data_delete_on_termination: false)
+#   - Apps at /opt/apps remain intact
+#   - New IP address will be assigned (update DNS afterwards)
+
+- name: Display redeploy plan
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+  tasks:
+    - name: Detect existing data volume
+      amazon.aws.ec2_vol_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ ebs_data_volume_name }}"
+          status: "available"
+      register: available_volumes
+
+    - name: Detect attached data volume on current instance
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ host_name }}"
+          "instance-state-name":
+            - running
+            - stopped
+      register: current_instances
+
+    - name: Extract attached volume from running instance
+      set_fact:
+        attached_data_volumes: >-
+          {{
+            current_instances.instances
+            | selectattr('block_device_mappings', 'defined')
+            | map(attribute='block_device_mappings')
+            | flatten
+            | selectattr('device_name', 'equalto', ebs_device_name)
+            | map(attribute='ebs.volume_id')
+            | list
+          }}
+      when: current_instances.instances | length > 0
+
+    - name: Determine which volume to reattach
+      set_fact:
+        data_volume_to_reattach: >-
+          {{
+            (attached_data_volumes | default([]) | first)
+            if (attached_data_volumes | default([]) | length > 0)
+            else (available_volumes.volumes | map(attribute='id') | first)
+            if (available_volumes.volumes | length > 0)
+            else ''
+          }}
+
+    - name: Show redeploy plan
+      debug:
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   Server Redeploy Plan                                  ║"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  Server:       {{ host_name }}"
+          - "  Region:       {{ aws_region }}"
+          - "  Current IP:   {{ current_instances.instances[0].public_ip_address if current_instances.instances | length > 0 else 'N/A' }}"
+          - ""
+          - "  Data volume:  {{ data_volume_to_reattach if data_volume_to_reattach else 'NONE FOUND — will create new' }}"
+          - "  Apps:         {{ apps_root }} (will be {{ 'PRESERVED' if data_volume_to_reattach else 'EMPTY on new volume' }})"
+          - ""
+          - "  Steps:"
+          - "    1. Terminate current instance"
+          - "    2. Launch new instance (latest Ubuntu 24.04 LTS)"
+          - "    3. {{ 'Reattach existing data volume' if data_volume_to_reattach else 'Create new data volume' }}"
+          - "    4. Run security hardening"
+          - ""
+          - "  ⚠  WARNING: New public IP will be assigned — update DNS afterwards"
+
+    - name: Confirm before proceeding
+      pause:
+        prompt: |
+
+          Press Enter to continue with redeploy, or Ctrl-C to abort
+
+# ==============================================================================
+# Step 1: Terminate Current Instance
+# ==============================================================================
+- name: Step 1 — Terminate Current Instance
+  import_playbook: terminate-ec2-instance.yml
+
+# ==============================================================================
+# Step 2: Launch New Instance with Latest AMI
+# ==============================================================================
+- name: Step 2 — Launch New Instance
+  import_playbook: launch-ec2-instance.yml
+
+# ==============================================================================
+# Step 3: Reattach Existing Data Volume (if detached)
+# ==============================================================================
+- name: Step 3 — Reattach Existing Data Volume
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+  tasks:
+    - name: Get newly launched instance
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ host_name }}"
+          "instance-state-name":
+            - running
+      register: new_instance
+
+    - name: Detect available data volume
+      amazon.aws.ec2_vol_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ ebs_data_volume_name }}"
+          status: "available"
+      register: available_volumes
+
+    - name: Check if new instance already has correct data volume attached
+      set_fact:
+        current_data_volume: >-
+          {{
+            new_instance.instances[0].block_device_mappings
+            | selectattr('device_name', 'equalto', ebs_device_name)
+            | map(attribute='ebs.volume_id')
+            | first
+            | default('')
+          }}
+      when: new_instance.instances | length > 0
+
+    - name: Reattach existing data volume if needed
+      block:
+        - name: Stop instance to safely swap volumes
+          amazon.aws.ec2_instance:
+            instance_ids: ["{{ new_instance.instances[0].instance_id }}"]
+            state: stopped
+            region: "{{ aws_region }}"
+            wait: yes
+
+        - name: Detach newly created empty volume
+          amazon.aws.ec2_vol:
+            id: "{{ current_data_volume }}"
+            instance: None
+            region: "{{ aws_region }}"
+            state: absent
+            delete_on_termination: yes
+          when: current_data_volume
+
+        - name: Wait for volume to detach
+          pause:
+            seconds: 5
+
+        - name: Attach old data volume
+          amazon.aws.ec2_vol:
+            id: "{{ available_volumes.volumes[0].id }}"
+            instance: "{{ new_instance.instances[0].instance_id }}"
+            device_name: "{{ ebs_device_name }}"
+            region: "{{ aws_region }}"
+            delete_on_termination: no
+
+        - name: Start instance with correct volume
+          amazon.aws.ec2_instance:
+            instance_ids: ["{{ new_instance.instances[0].instance_id }}"]
+            state: running
+            region: "{{ aws_region }}"
+            wait: yes
+
+        - name: Get new public IP
+          amazon.aws.ec2_instance_info:
+            region: "{{ aws_region }}"
+            instance_ids: ["{{ new_instance.instances[0].instance_id }}"]
+          register: updated_instance
+
+        - name: Update inventory with new IP
+          copy:
+            content: |
+              # ============================================================================
+              # Server Inventory — AUTO-GENERATED by redeploy-server.yml
+              # Last updated: {{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}
+              # Server: {{ host_name }}  IP: {{ updated_instance.instances[0].public_ip_address }}
+              #
+              # This file is gitignored. Template: inventories/hosts.yml.example
+              # ============================================================================
+
+              all:
+                children:
+                  app_servers:
+                    children:
+                      production:
+                        hosts:
+                          server:
+                            ansible_host: {{ updated_instance.instances[0].public_ip_address }}
+                            ansible_connection: ssh
+                            ansible_user: ubuntu
+                            ansible_ssh_private_key_file: {{ ssh_key_file }}
+
+                vars:
+                  ansible_user: ubuntu
+                  ansible_python_interpreter: /usr/bin/python3
+            dest: "{{ playbook_dir }}/../inventories/hosts.yml"
+
+        - name: Update SSH config with new IP
+          shell: |
+            python3 << 'PYEOF'
+            import os, pathlib, re
+            host     = os.environ['SSH_HOST']
+            hostname = os.environ['SSH_HOSTNAME']
+            user     = os.environ['SSH_USER']
+            keyfile  = os.environ['SSH_KEYFILE']
+
+            config_path = pathlib.Path.home() / '.ssh' / 'config'
+            config_path.parent.mkdir(mode=0o700, exist_ok=True)
+            config_path.touch(mode=0o600, exist_ok=True)
+            content = config_path.read_text()
+
+            # Remove old entry
+            content = re.sub(rf'(?m)^Host {re.escape(host)}\n(?:[ \t]+[^\n]*\n)*', '', content)
+            content = re.sub(r'\n{3,}', '\n\n', content).strip()
+
+            new_block = (
+                f'Host {host}\n'
+                f'    HostName {hostname}\n'
+                f'    User {user}\n'
+                f'    IdentityFile {keyfile}\n'
+                f'    IdentitiesOnly yes\n'
+                f'    ServerAliveInterval 60\n'
+                f'    ServerAliveCountMax 10\n'
+            )
+            content = (content + '\n\n' + new_block) if content else new_block
+            config_path.write_text(content)
+            PYEOF
+          environment:
+            SSH_HOST: "{{ host_name }}"
+            SSH_HOSTNAME: "{{ updated_instance.instances[0].public_ip_address }}"
+            SSH_USER: "{{ admin_user }}"
+            SSH_KEYFILE: "{{ ssh_key_file }}"
+          delegate_to: localhost
+          become: no
+          changed_when: true
+
+        - name: Display volume swap summary
+          debug:
+            msg:
+              - "✓ Data volume reattached successfully"
+              - "  Old volume:  {{ available_volumes.volumes[0].id }}"
+              - "  Attached to: {{ new_instance.instances[0].instance_id }}"
+              - "  New IP:      {{ updated_instance.instances[0].public_ip_address }}"
+
+      when:
+        - available_volumes.volumes | length > 0
+        - new_instance.instances | length > 0
+
+# ==============================================================================
+# Step 4: Harden Server
+# ==============================================================================
+- name: Step 4 — Harden Server
+  import_playbook: harden-server.yml
+
+# ==============================================================================
+# Summary
+# ==============================================================================
+- name: Redeploy Complete
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+  tasks:
+    - name: Get final instance details
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ host_name }}"
+          "instance-state-name": "running"
+      register: final_instance
+
+    - name: Display completion summary
+      debug:
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ✓ Server Redeploy Complete                            ║"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  Server:       {{ host_name }}"
+          - "  Instance:     {{ final_instance.instances[0].instance_id }}"
+          - "  New IP:       {{ final_instance.instances[0].public_ip_address }}"
+          - "  OS:           Ubuntu 24.04 LTS (latest)"
+          - "  Data:         {{ apps_root }} (preserved)"
+          - ""
+          - "  ⚠  ACTION REQUIRED:"
+          - "    1. Update DNS records to point to new IP"
+          - "    2. Test SSH:  ssh -i {{ ssh_key_file }} ubuntu@{{ final_instance.instances[0].public_ip_address }}"
+          - "    3. Verify apps are working"
+          - ""
+          - "  Your applications and data at {{ apps_root }} are intact."
+

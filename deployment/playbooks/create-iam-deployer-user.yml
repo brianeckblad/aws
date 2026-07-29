@@ -3,7 +3,7 @@
 #
 # Run this ONCE with temporary root credentials before any other playbook.
 # Creates a scoped IAM user ({{ host_name }}-deployer) with the minimum
-d# permissions required to provision and manage this specific EC2 server.
+# permissions required to provision and manage this specific EC2 server.
 #
 # Policies (all scoped to this server's resources):
 #   EC2        — instances/SGs/keys/volumes tagged or named {host_name}*

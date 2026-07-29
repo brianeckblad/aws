@@ -91,6 +91,7 @@ create-iam-role.yml         → idempotent: creates or updates policies
 create-ssh-key.yml          → create-only: skips if key already exists in AWS
 launch-ec2-instance.yml     → create-only: skips if instance with Name tag exists
 harden-server.yml           → idempotent: applies config, skips already-correct
+redeploy-server.yml         → DESTRUCTIVE: terminates + relaunches; reattaches data volume
 ```
 
 **Idempotency:** All playbooks are safe to re-run. Use this when troubleshooting — re-run only the failing playbook without touching resources from earlier steps.

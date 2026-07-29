@@ -37,10 +37,24 @@ ansible-galaxy collection install -r requirements.yml --upgrade
 
 # Then switch into deployment/
 cd deployment
-cp group_vars/vault.yml.example group_vars/vault.yml
-# Edit vault.yml, then encrypt:
+./scripts/local-dev-setup.sh          # scaffolds group_vars/vault.yml + inventories/hosts.yml
+nano group_vars/vault.yml             # set host_name, aws_region, (optional) aws_profile
 ansible-vault encrypt group_vars/vault.yml --vault-password-file ~/.vault_pass
 ```
+
+> The vault password is loaded automatically by `ansible.cfg` (`scripts/vault-password.sh`),
+> so playbook commands below do **not** need `--vault-password-file`.
+
+### Load deployment variables (each new shell)
+
+```bash
+source scripts/load-vars.sh
+```
+
+This exports `host_name`, `aws_region`, `admin_user`, and — if `aws_profile` is set in
+your vault — `AWS_PROFILE`, so the AWS CLI and `amazon.aws` modules use the right
+credentials. If your credentials are already the `[default]` AWS profile, `aws_profile`
+is optional. See [AWS Deployer User](docs/guides/AWS_DEPLOYER_USER.md).
 
 ### Provision the server
 
@@ -48,11 +62,22 @@ ansible-vault encrypt group_vars/vault.yml --vault-password-file ~/.vault_pass
 ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass
 ```
 
+### Redeploy the server (fresh OS, preserves data)
+
+```bash
+ansible-playbook playbooks/redeploy-server.yml --vault-password-file ~/.vault_pass
+```
+
+See [REDEPLOY.md](docs/guides/REDEPLOY.md) for details.
+
 ### Decommission the server
 
 ```bash
-ansible-playbook playbooks/decommission.yml --vault-password-file ~/.vault_pass \
+ansible-playbook playbooks/decommission.yml \
+  --vault-password-file ~/.vault_pass \
   -e decommission_confirmed=true
+# or use the guided discovery wrapper:
+./scripts/decommission.sh
 ```
 
 ---
@@ -69,6 +94,14 @@ ansible-playbook playbooks/decommission.yml --vault-password-file ~/.vault_pass 
 | `create-ssh-key.yml` | SSH key pair |
 | `launch-ec2-instance.yml` | EC2 + EBS data volume |
 | `harden-server.yml` | OS hardening, supervisor, fail2ban, UFW |
+
+### Redeploy (fresh OS, preserves data)
+
+| Playbook | Purpose |
+|----------|---------|
+| `redeploy-server.yml` | Master — terminates instance, launches new with latest AMI, reattaches data volume, hardens |
+
+See [REDEPLOY.md](docs/guides/REDEPLOY.md) for the complete redeploy guide.
 
 ### Update (running server)
 

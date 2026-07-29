@@ -11,6 +11,7 @@
 #   aws_region   — AWS region
 #   admin_user   — SSH login user on the EC2 instance
 #   server_ip    — public IP (only if a running instance is found)
+#   AWS_PROFILE  — AWS CLI/boto3 profile (only if aws_profile set in vault)
 
 # ── Guard: must be sourced ────────────────────────────────────────────────────
 _is_sourced=false
@@ -101,6 +102,15 @@ if [ -z "$host_name" ] || [ -z "$aws_region" ] || [ -z "$admin_user" ]; then
     return 1
 fi
 
+# ── Optionally export AWS_PROFILE ─────────────────────────────────────────────
+# If aws_profile is set in vault.yml, export it so the AWS CLI and the
+# amazon.aws / community.aws Ansible modules (via boto3) use the right
+# credentials. Omit the key to use your default AWS profile.
+_aws_profile=$(_vault_get "aws_profile")
+if [ -n "$_aws_profile" ]; then
+    export AWS_PROFILE="$_aws_profile"
+fi
+
 # ── Optionally load server IP ─────────────────────────────────────────────────
 export server_ip=""
 
@@ -134,6 +144,9 @@ echo -e "${_GREEN}✅  Variables loaded:${_NC}"
 echo -e "  ${_YELLOW}host_name${_NC}   = $host_name"
 echo -e "  ${_YELLOW}aws_region${_NC}  = $aws_region"
 echo -e "  ${_YELLOW}admin_user${_NC}  = $admin_user"
+if [ -n "$AWS_PROFILE" ]; then
+    echo -e "  ${_YELLOW}AWS_PROFILE${_NC} = $AWS_PROFILE"
+fi
 if [ -n "$server_ip" ]; then
     echo -e "  ${_YELLOW}server_ip${_NC}   = $server_ip"
 fi
@@ -142,6 +155,6 @@ echo ""
 # ── Cleanup private vars ──────────────────────────────────────────────────────
 unset _SCRIPT_DIR _DEPLOYMENT_DIR _GROUP_VARS _INVENTORY
 unset _GREEN _YELLOW _RED _BLUE _NC
-unset _is_sourced _detected_ip _choice
+unset _is_sourced _detected_ip _choice _aws_profile
 unset -f _vault_get
 

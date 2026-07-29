@@ -33,6 +33,13 @@ admin_user: "ubuntu"            # SSH login user on Ubuntu EC2 AMIs
 # ============================================================================
 aws_region: "us-east-2"
 
+# AWS credentials profile (optional).
+# Set this if your credentials live under a named profile in ~/.aws/credentials
+# (e.g. [my-deployer]) instead of [default]. When set, `source scripts/load-vars.sh`
+# exports AWS_PROFILE so both the AWS CLI and the amazon.aws Ansible modules use it.
+# Leave commented to use your default AWS profile.
+# aws_profile: "my-deployer"
+
 # SSH CIDR restriction — applied to the EC2 security group (port 22).
 # If not set, defaults to the deployer machine's public IP at provision time.
 # Set a fixed CIDR if you have a static office/VPN IP (e.g. "203.0.113.0/24").

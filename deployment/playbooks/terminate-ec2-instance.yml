@@ -50,14 +50,13 @@
       when: ec2_instances.instances | length > 0
 
     - name: Disable termination protection
-      command: >
-        aws ec2 modify-instance-attribute
-        --instance-id {{ item.instance_id }}
-        --no-disable-api-termination
-        --region {{ aws_region }}
+      amazon.aws.ec2_instance:
+        instance_ids: ["{{ item.instance_id }}"]
+        termination_protection: false
+        region: "{{ aws_region }}"
+        state: present
       loop: "{{ ec2_instances.instances }}"
       when: ec2_instances.instances | length > 0
-      failed_when: false
 
     - name: Terminate EC2 instance
       amazon.aws.ec2_instance:
