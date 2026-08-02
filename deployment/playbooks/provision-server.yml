@@ -14,6 +14,7 @@
 #   3. SSH key pair     — host_name-key  (saved to ~/.ssh/)
 #   4. EC2 instance     — tagged Name=host_name, EBS at apps_root
 #   5. Server hardening — OS hardening, supervisor, fail2ban, UFW
+#   6. Verify           — confirms all AWS resources and server health
 #
 # What this does NOT do (app-level concerns):
 #   - Deploy any application code
@@ -60,6 +61,7 @@
           - "    3. SSH key pair    — {{ ssh_key_name }} → {{ ssh_key_file }}"
           - "    4. EC2 instance    — Name: {{ host_name }}"
           - "    5. Server harden   — OS, supervisor, fail2ban, UFW, unattended-upgrades"
+          - "    6. Verify          — AWS resources + server health checks"
           - ""
           - "  This server can host multiple apps once provisioned."
 
@@ -94,8 +96,12 @@
   import_playbook: harden-server.yml
 
 # ==============================================================================
-# Summary
+# Step 6: Verify Everything
 # ==============================================================================
+- name: Step 6 — Verify
+  import_playbook: verify.yml
+
+
 - name: Server Provisioning Complete
   hosts: localhost
   gather_facts: no

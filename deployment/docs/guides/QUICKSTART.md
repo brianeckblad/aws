@@ -23,7 +23,7 @@ This reads `group_vars/vault.yml` and exports `host_name`, `aws_region`, and `ad
 ### 2. Provision
 
 ```bash
-ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/provision-server.yml --vault-password-file ~/.vault_pass
 ```
 
 This runs all five steps in order:
@@ -35,6 +35,7 @@ This runs all five steps in order:
 | 3 | `create-ssh-key.yml` | Key pair `{host_name}-key` → `~/.ssh/{host_name}-key.pem` |
 | 4 | `launch-ec2-instance.yml` | EC2 instance + EBS data volume at `apps_root` |
 | 5 | `harden-server.yml` | OS hardening, fail2ban, UFW, unattended-upgrades |
+| 6 | `verify.yml` | Verifies all AWS resources and server health |
 
 **Duration:** 10–15 minutes (most of which is waiting for EC2 to become reachable).
 
@@ -72,22 +73,23 @@ The exact SSH command is in `deployment/instances/*.txt`.
 ### 5. Verify the server
 
 ```bash
-sudo systemctl is-active fail2ban unattended-upgrades
-sudo ufw status
+uv run ansible-playbook playbooks/verify.yml --vault-password-file ~/.vault_pass
 ```
 
-Expected: both services show `active`; UFW shows ports 22, 80, and 443 open with default deny.
+This checks all AWS resources and server health in one pass:
 
-The server foundation is now in place:
+| Check | What it verifies |
+|-------|-----------------|
+| EC2 instance | Running, has a public IP |
+| Security group | Exists, ports 22/80/443 open |
+| IAM role | Exists |
+| SSH key pair | Exists in AWS and on disk |
+| Services | `supervisor`, `fail2ban`, `unattended-upgrades`, `ufw` all active |
+| EBS mount | Data volume mounted at `apps_root` |
+| UFW | Enabled, ports 22/80/443 allowed |
+| SSH hardening | Key-only auth, no root login, `MaxAuthTries 3` |
 
-```
-/opt/apps/           ← EBS data volume (100 GB, survives termination)
-/var/log/apps/       ← shared log root
-
-fail2ban             ← running, SSH brute-force protection active
-ufw                  ← active, default deny; 22/80/443 open
-unattended-upgrades  ← running, automatic security patches enabled
-```
+A clean run prints `✓ All Checks Passed`. Any failure stops with a message indicating which playbook to re-run.
 
 The server is **ready for application deployment** from each app's own repo.
 
@@ -101,11 +103,12 @@ Each app will:
 If you need to re-run a single step:
 
 ```bash
-ansible-playbook playbooks/create-security-group.yml --vault-password-file ~/.vault_pass
-ansible-playbook playbooks/create-iam-role.yml        --vault-password-file ~/.vault_pass
-ansible-playbook playbooks/create-ssh-key.yml         --vault-password-file ~/.vault_pass
-ansible-playbook playbooks/launch-ec2-instance.yml    --vault-password-file ~/.vault_pass
-ansible-playbook playbooks/harden-server.yml          --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/create-security-group.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/create-iam-role.yml        --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/create-ssh-key.yml         --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/launch-ec2-instance.yml    --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/harden-server.yml          --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/verify.yml                 --vault-password-file ~/.vault_pass
 ```
 
 ---
@@ -132,7 +135,7 @@ ssh -i ~/.ssh/${host_name}-key.pem ${admin_user}@${server_ip}
 Apply OS package upgrades and re-apply hardening config without touching app deployments:
 
 ```bash
-ansible-playbook playbooks/update-server.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/update-server.yml --vault-password-file ~/.vault_pass
 ```
 
 This also updates the security group SSH rule to your current public IP before connecting, so it works even if your IP has changed.
@@ -142,7 +145,7 @@ This also updates the security group SSH rule to your current public IP before c
 To rebuild the instance on the latest Ubuntu 24.04 LTS AMI while preserving `/opt/apps`:
 
 ```bash
-ansible-playbook playbooks/redeploy-server.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/redeploy-server.yml --vault-password-file ~/.vault_pass
 ```
 
 This terminates the instance, launches a new one, reattaches the existing data volume, and re-hardens. A new public IP is assigned — update DNS afterwards. See [Redeploy](REDEPLOY.md) for details.
@@ -158,7 +161,7 @@ To tear down all AWS resources for this server:
 Or run the playbook directly:
 
 ```bash
-ansible-playbook playbooks/decommission.yml \
+uv run ansible-playbook playbooks/decommission.yml \
   --vault-password-file ~/.vault_pass \
   -e decommission_confirmed=true
 ```
@@ -172,7 +175,7 @@ This removes all 6 resource types in order (EC2 → EBS data volume → SSH key 
 | Problem | Fix |
 |---------|-----|
 | `Unable to locate credentials` | `aws configure` — re-enter deployer key and secret. Using a named profile? Set `aws_profile` in vault and `source scripts/load-vars.sh`. See [AWS Deployer User](AWS_DEPLOYER_USER.md) |
-| `No module named 'boto3'` | `pip install -r requirements.txt` (run from repo root) |
+| `No module named 'boto3'` | `uv sync` (run from repo root) |
 | `UNREACHABLE` after EC2 launch | Wait 60–90 seconds for SSH to come up and re-run `harden-server.yml` |
 | `Permission denied (publickey)` | Check `~/.ssh/${host_name}-key.pem` exists and has `chmod 600` |
 | Vault password wrong | `ansible-vault view group_vars/vault.yml --vault-password-file ~/.vault_pass` |

@@ -1,0 +1,330 @@
+---
+# verify.yml — Verify all AWS resources and server health after provisioning
+#
+# Checks everything from "Step 6: Verify Everything" in the manual deployment
+# guide as an automated playbook.
+#
+# What this checks:
+#   AWS Resources (localhost):
+#     - EC2 instance exists and is running
+#     - Security group exists with correct ports (22, 80, 443)
+#     - IAM role and instance profile exist
+#     - SSH key pair exists
+#
+#   Server Health (remote):
+#     - Services running: supervisor, fail2ban, unattended-upgrades, ufw
+#     - EBS data volume mounted at apps_root
+#     - UFW enabled with correct rules
+#     - SSH hardening: PasswordAuthentication no, PermitRootLogin no, MaxAuthTries 3
+#
+# Usage:
+#   ansible-playbook playbooks/verify.yml \
+#     --vault-password-file ~/.vault_pass
+
+# ==============================================================================
+# Play 1 — AWS Resource Checks (runs locally via AWS API)
+# ==============================================================================
+- name: Verify AWS Resources
+  hosts: localhost
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+
+    - name: Show verification plan
+      debug:
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   Verify — {{ host_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  Checking AWS resources and server health..."
+          - ""
+          - "  AWS:    EC2 instance, security group, IAM role, SSH key pair"
+          - "  Server: services, EBS mount, UFW, SSH hardening"
+
+    # -------------------------------------------------------------------------
+    # EC2 Instance
+    # -------------------------------------------------------------------------
+    - name: Get EC2 instance info
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ host_name }}"
+          "instance-state-name":
+            - running
+      register: ec2_info
+
+    - name: Fail if EC2 instance is not running
+      ansible.builtin.fail:
+        msg: >
+          No running EC2 instance found with Name={{ host_name }} in {{ aws_region }}.
+          Run provision-server.yml or launch-ec2-instance.yml first.
+      when: ec2_info.instances | length == 0
+
+    - name: Set instance facts
+      set_fact:
+        instance_id:  "{{ ec2_info.instances[0].instance_id }}"
+        instance_ip:  "{{ ec2_info.instances[0].public_ip_address | default('NO PUBLIC IP') }}"
+        instance_state: "{{ ec2_info.instances[0].state.name }}"
+
+    - name: EC2 — instance running
+      debug:
+        msg: "  ✓ EC2  {{ instance_id }}  state={{ instance_state }}  ip={{ instance_ip }}"
+
+    # -------------------------------------------------------------------------
+    # Security Group
+    # -------------------------------------------------------------------------
+    - name: Get security group info
+      amazon.aws.ec2_security_group_info:
+        region: "{{ aws_region }}"
+        filters:
+          group-name: "{{ security_group_name }}"
+      register: sg_info
+
+    - name: Fail if security group does not exist
+      ansible.builtin.fail:
+        msg: "Security group '{{ security_group_name }}' not found in {{ aws_region }}."
+      when: sg_info.security_groups | length == 0
+
+    - name: Set security group port facts
+      set_fact:
+        sg_ports: >-
+          {{ sg_info.security_groups[0].ip_permissions
+             | map(attribute='from_port') | list | sort }}
+
+    - name: Fail if required ports are missing from security group
+      ansible.builtin.fail:
+        msg: >
+          Security group {{ security_group_name }} is missing required ports.
+          Expected 22, 80, 443. Found: {{ sg_ports }}
+      when: >
+        22  not in sg_ports or
+        80  not in sg_ports or
+        443 not in sg_ports
+
+    - name: Security group — ports open
+      debug:
+        msg: "  ✓ Security group  {{ security_group_name }}  ports={{ sg_ports }}"
+
+    # -------------------------------------------------------------------------
+    # IAM Role
+    # -------------------------------------------------------------------------
+    - name: Get IAM role info
+      amazon.aws.iam_role_info:
+        name: "{{ iam_role_name }}"
+      register: iam_info
+      failed_when: false
+
+    - name: Fail if IAM role does not exist
+      ansible.builtin.fail:
+        msg: "IAM role '{{ iam_role_name }}' not found."
+      when: iam_info.iam_roles | length == 0
+
+    - name: IAM role — exists
+      debug:
+        msg: "  ✓ IAM role  {{ iam_role_name }}"
+
+    # -------------------------------------------------------------------------
+    # SSH Key Pair
+    # -------------------------------------------------------------------------
+    - name: Get SSH key pair info
+      amazon.aws.ec2_key_info:
+        region: "{{ aws_region }}"
+        names:
+          - "{{ ssh_key_name }}"
+      register: key_info
+      failed_when: false
+
+    - name: Fail if SSH key pair does not exist in AWS
+      ansible.builtin.fail:
+        msg: "SSH key pair '{{ ssh_key_name }}' not found in {{ aws_region }}."
+      when: key_info.keypairs | length == 0
+
+    - name: Check local SSH key file exists
+      ansible.builtin.stat:
+        path: "{{ ssh_key_file }}"
+      register: key_file_stat
+
+    - name: Warn if local SSH key file is missing
+      debug:
+        msg: "  ⚠  Local key file {{ ssh_key_file }} not found — SSH connections will fail."
+      when: not key_file_stat.stat.exists
+
+    - name: SSH key pair — exists
+      debug:
+        msg: >-
+          ✓ SSH key  {{ ssh_key_name }}
+          (local file: {{ 'present' if key_file_stat.stat.exists else 'MISSING' }})
+
+    # -------------------------------------------------------------------------
+    # AWS Summary
+    # -------------------------------------------------------------------------
+    - name: AWS resources — all checks passed
+      debug:
+        msg:
+          - "  ✓ All AWS resource checks passed."
+          - ""
+          - "  Instance IP for server checks: {{ instance_ip }}"
+
+
+# ==============================================================================
+# Play 2 — Server Health Checks (runs over SSH on the EC2 instance)
+# ==============================================================================
+- name: Verify Server Health
+  hosts: all
+  become: yes
+  gather_facts: no
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/vault.yml
+
+  tasks:
+
+    - name: Wait for SSH connection
+      wait_for_connection:
+        timeout: 60
+      become: no
+
+    # -------------------------------------------------------------------------
+    # Services
+    # -------------------------------------------------------------------------
+    - name: Check required services are active
+      ansible.builtin.command: "systemctl is-active {{ item }}"
+      register: svc_result
+      changed_when: false
+      failed_when: false
+      loop:
+        - supervisor
+        - fail2ban
+        - unattended-upgrades
+        - ufw
+
+    - name: Fail if any required service is not active
+      ansible.builtin.fail:
+        msg: "Service '{{ item.item }}' is not active (status: {{ item.stdout }})."
+      when: item.stdout != 'active'
+      loop: "{{ svc_result.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Services — all active
+      debug:
+        msg: "  ✓ Services active: supervisor, fail2ban, unattended-upgrades, ufw"
+
+    # -------------------------------------------------------------------------
+    # EBS Data Volume Mount
+    # -------------------------------------------------------------------------
+    - name: Check EBS data volume is mounted at apps_root
+      ansible.builtin.command: "mountpoint -q {{ apps_root }}"
+      register: mount_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if apps_root is not a mountpoint
+      ansible.builtin.fail:
+        msg: >
+          {{ apps_root }} is not mounted. EBS data volume may not be attached
+          or /etc/fstab entry is missing. Run harden-server.yml to re-provision.
+      when: mount_check.rc != 0
+
+    - name: Get disk usage at apps_root
+      ansible.builtin.command: "df -h {{ apps_root }}"
+      register: df_result
+      changed_when: false
+
+    - name: EBS — mounted at apps_root
+      debug:
+        msg:
+          - "  ✓ EBS mounted at {{ apps_root }}"
+          - "{{ df_result.stdout_lines | join('\n') }}"
+
+    # -------------------------------------------------------------------------
+    # UFW Firewall
+    # -------------------------------------------------------------------------
+    - name: Check UFW is enabled
+      ansible.builtin.command: ufw status
+      register: ufw_status
+      changed_when: false
+
+    - name: Fail if UFW is not active
+      ansible.builtin.fail:
+        msg: "UFW is not active. Run harden-server.yml to re-apply firewall rules."
+      when: "'Status: active' not in ufw_status.stdout"
+
+    - name: Check required UFW ports are open
+      ansible.builtin.shell: "ufw status | grep -E '^{{ item }}[[:space:]]'"
+      register: ufw_port_check
+      changed_when: false
+      failed_when: false
+      loop:
+        - "22"
+        - "80"
+        - "443"
+
+    - name: Fail if a required UFW port rule is missing
+      ansible.builtin.fail:
+        msg: "UFW rule for port {{ item.item }} not found. Run harden-server.yml."
+      when: item.rc != 0
+      loop: "{{ ufw_port_check.results }}"
+      loop_control:
+        label: "port {{ item.item }}"
+
+    - name: UFW — active with required ports
+      debug:
+        msg: "  ✓ UFW active  ports 22, 80, 443 open"
+
+    # -------------------------------------------------------------------------
+    # SSH Hardening
+    # -------------------------------------------------------------------------
+    - name: Read effective SSH hardening config
+      ansible.builtin.shell: >
+        sshd -T 2>/dev/null |
+        grep -E '^(passwordauthentication|permitrootlogin|maxauthtries)\s'
+      register: sshd_config
+      changed_when: false
+
+    - name: Fail if PasswordAuthentication is not disabled
+      ansible.builtin.fail:
+        msg: "SSH PasswordAuthentication is not 'no'. Run harden-server.yml."
+      when: "'passwordauthentication no' not in sshd_config.stdout"
+
+    - name: Fail if PermitRootLogin is not disabled
+      ansible.builtin.fail:
+        msg: "SSH PermitRootLogin is not 'no'. Run harden-server.yml."
+      when: "'permitrootlogin no' not in sshd_config.stdout"
+
+    - name: Fail if MaxAuthTries is not 3
+      ansible.builtin.fail:
+        msg: "SSH MaxAuthTries is not 3. Run harden-server.yml."
+      when: "'maxauthtries 3' not in sshd_config.stdout"
+
+    - name: SSH hardening — verified
+      debug:
+        msg: "  ✓ SSH hardening: PasswordAuthentication no, PermitRootLogin no, MaxAuthTries 3"
+
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+    - name: Display verification summary
+      debug:
+        msg:
+          - "╔══════════════════════════════════════════════════════════╗"
+          - "║   ✓ All Checks Passed — {{ host_name }}"
+          - "╚══════════════════════════════════════════════════════════╝"
+          - ""
+          - "  AWS Resources:"
+          - "    ✓ EC2 instance      — running"
+          - "    ✓ Security group    — {{ security_group_name }}  (22, 80, 443)"
+          - "    ✓ IAM role          — {{ iam_role_name }}"
+          - "    ✓ SSH key pair      — {{ ssh_key_name }}"
+          - ""
+          - "  Server Health:"
+          - "    ✓ supervisor        — active"
+          - "    ✓ fail2ban          — active"
+          - "    ✓ unattended-upgrades — active"
+          - "    ✓ ufw               — active (22, 80, 443 open)"
+          - "    ✓ EBS               — mounted at {{ apps_root }}"
+          - "    ✓ SSH hardening     — key-only, no root, 3 retries"

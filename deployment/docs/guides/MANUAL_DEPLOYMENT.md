@@ -7,6 +7,8 @@ Each of the 5 steps shows three options:
 - **AWS Console** — using the web interface
 - **AWS CLI** — using terminal commands
 
+Step 6 (verification) has an Ansible playbook and a manual CLI option.
+
 > **Variables used throughout this guide** (all come from `group_vars/vault.yml`):
 > ```
 > host_name={{ host_name }}              # short server name
@@ -43,7 +45,7 @@ Each of the 5 steps shows three options:
 
 ```bash
 cd deployment
-ansible-playbook playbooks/create-security-group.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/create-security-group.yml --vault-password-file ~/.vault_pass
 ```
 
 ### Option B: AWS Console
@@ -146,7 +148,7 @@ aws ec2 describe-security-groups \
 ### Option A: Ansible (recommended)
 
 ```bash
-ansible-playbook playbooks/create-iam-role.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/create-iam-role.yml --vault-password-file ~/.vault_pass
 ```
 
 ### Option B: AWS Console
@@ -379,7 +381,7 @@ aws iam list-role-policies --role-name "$ROLE" \
 ### Option A: Ansible (recommended)
 
 ```bash
-ansible-playbook playbooks/create-ssh-key.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/create-ssh-key.yml --vault-password-file ~/.vault_pass
 ```
 
 ### Option B: AWS Console
@@ -446,7 +448,7 @@ ls -la "$KEY_FILE"
 ### Option A: Ansible (recommended)
 
 ```bash
-ansible-playbook playbooks/launch-ec2-instance.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/launch-ec2-instance.yml --vault-password-file ~/.vault_pass
 ```
 
 ### Option B: AWS Console
@@ -635,7 +637,7 @@ ssh -i "$KEY_FILE" ubuntu@<IP> "echo SSH_OK"
 ### Option A: Ansible (recommended, strongly preferred)
 
 ```bash
-ansible-playbook playbooks/harden-server.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/harden-server.yml --vault-password-file ~/.vault_pass
 ```
 
 ### Option B: Manual SSH steps
@@ -805,7 +807,31 @@ df -h /opt/apps
 
 ## Step 6: Verify Everything
 
+### Option A: Ansible (recommended)
+
 Run after completing all steps (automated or manual):
+
+```bash
+cd deployment
+uv run ansible-playbook playbooks/verify.yml --vault-password-file ~/.vault_pass
+```
+
+This checks everything in one pass and fails fast with a clear message if anything is wrong:
+
+| Check | What it verifies |
+|-------|-----------------|
+| EC2 instance | Running, has a public IP |
+| Security group | Exists, ports 22/80/443 open |
+| IAM role | Exists |
+| SSH key pair | Exists in AWS and on disk |
+| Services | `supervisor`, `fail2ban`, `unattended-upgrades`, `ufw` all active |
+| EBS mount | Data volume mounted at `apps_root` |
+| UFW | Enabled, ports 22/80/443 allowed |
+| SSH hardening | Key-only auth, no root login, `MaxAuthTries 3` |
+
+### Option B: Manual CLI
+
+If you prefer to check each resource by hand:
 
 ```bash
 # From your local machine
@@ -849,7 +875,7 @@ sudo ufw status verbose | head -10
 
 echo ""
 echo "SSH hardening:"
-sudo grep -E "^PasswordAuthentication|^PermitRootLogin|^MaxAuthTries" /etc/ssh/sshd_config
+sudo sshd -T | grep -E '^(passwordauthentication|permitrootlogin|maxauthtries)\s'
 REMOTE
 ```
 

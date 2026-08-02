@@ -45,7 +45,7 @@ source scripts/load-vars.sh
 ## Single-Command Redeploy
 
 ```bash
-ansible-playbook playbooks/redeploy-server.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/redeploy-server.yml --vault-password-file ~/.vault_pass
 ```
 
 The playbook prints a plan (current instance, data volume, new-IP warning) and pauses for confirmation before making any changes.
@@ -59,7 +59,7 @@ Every step is also an independent playbook, consistent with the rest of this pro
 ### 1. Terminate the current instance
 
 ```bash
-ansible-playbook playbooks/terminate-ec2-instance.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/terminate-ec2-instance.yml --vault-password-file ~/.vault_pass
 ```
 
 Disables termination protection and terminates the instance. The data volume remains (it is not deleted on termination).
@@ -67,7 +67,7 @@ Disables termination protection and terminates the instance. The data volume rem
 ### 2. Launch a new instance
 
 ```bash
-ansible-playbook playbooks/launch-ec2-instance.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/launch-ec2-instance.yml --vault-password-file ~/.vault_pass
 ```
 
 Selects the latest Ubuntu 24.04 LTS AMI and launches a new instance. This creates a **new empty** data volume — the next step swaps in your original.
@@ -77,7 +77,7 @@ Selects the latest Ubuntu 24.04 LTS AMI and launches a new instance. This create
 The reattach play lives inside `redeploy-server.yml`. After a manual launch you can run just that logic; it detects the available data volume and swaps it in:
 
 ```bash
-ansible-playbook playbooks/redeploy-server.yml \
+uv run ansible-playbook playbooks/redeploy-server.yml \
   --vault-password-file ~/.vault_pass \
   --start-at-task="Get newly launched instance"
 ```
@@ -85,7 +85,7 @@ ansible-playbook playbooks/redeploy-server.yml \
 ### 4. Harden the new instance
 
 ```bash
-ansible-playbook playbooks/harden-server.yml --vault-password-file ~/.vault_pass
+uv run ansible-playbook playbooks/harden-server.yml --vault-password-file ~/.vault_pass
 ```
 
 Applies OS hardening, firewall, fail2ban, and mounts the data volume at `apps_root`.
@@ -98,8 +98,12 @@ A new public IP is assigned on redeploy. After it completes:
 
 1. **Update DNS** — point your app domains at the new IP (shown in the summary and in `instances/{id}.txt`).
 2. **Test SSH** — `ssh {host_name}` (the `~/.ssh/config` entry is updated automatically).
-3. **Verify data** — `ls -la /opt/apps` should show your apps.
-4. **Restart apps** — services do not auto-start after a redeploy:
+3. **Verify the server** — confirm all AWS resources and server health in one pass:
+   ```bash
+   uv run ansible-playbook playbooks/verify.yml --vault-password-file ~/.vault_pass
+   ```
+4. **Verify data** — `ls -la /opt/apps` should show your apps.
+5. **Restart apps** — services do not auto-start after a redeploy:
    ```bash
    ssh {host_name}
    sudo supervisorctl restart all
